@@ -98,6 +98,24 @@ main.view{padding-block:18px calc(48px + env(safe-area-inset-bottom,0px))}
 .pill{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:999px;background:var(--sunk);font:600 12px var(--mono)}
 .pill.blunder{color:var(--blunder)}.pill.mistake{color:var(--mistake)}
 .empty{padding:24px 20px;display:grid;gap:10px;justify-items:start}
+.ccc{padding:14px 16px;display:grid;gap:12px}
+.ccc h2{font-size:17px;font-weight:700}
+.ccform{display:flex;gap:8px;flex-wrap:wrap}
+.ccform input{flex:1 1 180px;min-width:0;border:1px solid var(--line);border-radius:10px;padding:8px 12px;background:var(--bg);min-height:44px}
+.cchead,.ccq,.ccrow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;align-items:center}
+.ccrow{grid-template-columns:auto minmax(0,1fr) auto;padding-top:10px;border-top:1px solid var(--line)}
+.ccq{background:var(--sunk);border-radius:10px;padding:10px 12px}
+.cclist{display:grid;gap:10px}
+.cclisthead{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.res.sm{width:32px;height:32px;font-size:12px;border-radius:8px}
+.ccset{display:grid;gap:10px}
+.ccset summary{cursor:pointer;font-size:13px;color:var(--muted);min-height:32px;display:flex;align-items:center}
+.ccset label{margin-top:8px}
+.ccset select{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--bg);min-height:44px;font-size:16px;max-width:260px}
+.chk{display:flex!important;align-items:center;gap:10px;font-weight:600}
+.chk input{width:22px;height:22px;accent-color:var(--accent)}
+.pill.new{background:var(--accent);color:var(--accent-fg)}
+.ghead .meta a{color:var(--best)}
 .foot{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding-top:6px}
 
 /* game */
@@ -253,6 +271,7 @@ textarea{font-size:14px}
  <div id="updateNote" class="banner" hidden><p>A new version of the app is ready.</p><button id="updateBtn" class="btn sm primary">Update now</button></div>
  <div id="iosNote" class="banner" hidden><p><b>Install on your iPhone:</b> tap the Share button <span aria-hidden="true">(□↑)</span> in Safari, then <b>Add to Home Screen</b>.</p><button id="iosClose" class="btn sm ghost">Got it</button></div>
  <p id="storeNote" class="banner" hidden>This browser isn't letting the app save data (private browsing?). Games you analyze will disappear when you close it.</p>
+ <section id="ccCard" class="card ccc" aria-live="polite"></section>
  <div id="patterns" class="patterns"></div>
  <div id="gameList" class="glist"></div>
  <div class="foot">

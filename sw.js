@@ -1,5 +1,5 @@
 // Chess Review Lab service worker: lets the app open and analyze games offline.
-const VERSION = "crl-v1";
+const VERSION = "crl-v2";
 const SHELL = [
   "./", "index.html", "app.js", "core.js", "chess.js",
   "stockfish-19-lite-single.js", "stockfish-19-lite-single.wasm",

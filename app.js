@@ -177,7 +177,7 @@ function renderLibrary() {
     return `<button class="card gitem" data-open="${esc(id)}">
      <span class="res ${m.outcome || ""}">${resTxt}</span>
      <span class="gt"><b>${title}</b><span>${[m.date, me ? (me === "w" ? "White" : "Black") : "", m.opening, tcLabel(m.tc)].filter(Boolean).map(esc).join(" · ")}</span></span>
-     <span class="gs">${me ? `<span>${Math.round(m.acc[me])}%</span>` : ""}<span class="row">${c && c.blunder ? `<span class="pill blunder">${c.blunder}??</span>` : ""}${c && c.mistake ? `<span class="pill mistake">${c.mistake}?</span>` : ""}</span></span>
+     <span class="gs">${m.fresh ? '<span class="pill new">New</span>' : ""}${me ? `<span>${Math.round(m.acc[me])}%</span>` : ""}<span class="row">${c && c.blunder ? `<span class="pill blunder">${c.blunder}??</span>` : ""}${c && c.mistake ? `<span class="pill mistake">${c.mistake}?</span>` : ""}</span></span>
     </button>`;
   }).join("");
 }
@@ -189,6 +189,7 @@ async function openGame(id, push = true) {
   const meta = S.games.get(id); if (!meta) return;
   if (push) { try { history.pushState({ g: id }, "", "#" + encodeURIComponent(id)); } catch (e) {} }
   stopLine(); S.editing = null;
+  if (meta.fresh) { meta.fresh = false; store.put("games", id, meta).catch(() => {}); }
   showView("game");
   $("#mPanel").innerHTML = '<p class="note">Loading game…</p>';
   try {
@@ -215,6 +216,7 @@ function renderGame() {
   $("#gMeta").innerHTML = [
     `${esc(meta.white)}${meta.whiteElo ? ` (${esc(meta.whiteElo)})` : ""} – ${esc(meta.black)}${meta.blackElo ? ` (${esc(meta.blackElo)})` : ""}`,
     esc(meta.result), esc(meta.date), esc(meta.opening), esc(tcLabel(meta.tc)), `depth ${esc(meta.depth)}`,
+    /^https:\/\/(www\.)?chess\.com\//.test(meta.link || "") ? `<a href="${esc(meta.link)}" target="_blank" rel="noopener">View on chess.com ↗</a>` : "",
   ].filter(Boolean).map(x => `<span>${x}</span>`).join("");
   renderMoveList(); renderGraph(); renderSummary(); renderPosition();
 }
@@ -603,6 +605,8 @@ async function runAnalysis() {
       }, engine);
       const prev = S.games.get(id);
       if (prev) { rec.meta.notes = prev.notes || {}; rec.meta.summary = prev.summary || ""; }
+      rec.meta.mkey = matchKey(game.headers.White, game.headers.Black, game.headers.Date, game.moves.map(m => m.uci));
+      CC.recent = CC.recent.filter(x => x.mkey !== rec.meta.mkey);
       try { await saveGame(id, rec); }
       catch (e) { S.data.set(id, rec.data); S.games.set(id, rec.meta); toast("Analyzed, but this device wouldn't save it."); }
       if (!firstId) firstId = id;
@@ -614,7 +618,7 @@ async function runAnalysis() {
   } catch (e) {
     if (e.message !== "cancelled") { err.textContent = e.message || "Something went wrong analyzing that game."; err.hidden = false; }
   } finally {
-    $("#goBtn").disabled = false; cancelTok = null; keepAwake(false);
+    $("#goBtn").disabled = false; cancelTok = null; if (!CC.running) keepAwake(false);
     if (!err.hidden) $("#progWrap").hidden = true;
   }
 }
@@ -766,6 +770,229 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
   }).catch(() => {});
 }
 
+
+// ---------- chess.com account sync ----------
+// Uses chess.com's public API (https://www.chess.com/news/view/published-data-api): no login needed.
+const CC_API = "https://api.chess.com/pub/player/";
+const CC = {
+  cfg: null,          // {user, since, auto, depth, lastSync}
+  recent: [],         // [{url, end, pgn, game, mkey, outcome, opp, oppElo, tclass, tc, date}]
+  status: "",         // text shown in the card
+  syncing: false,
+  showAll: false,
+  queue: [], running: null, cancel: null, done: 0, total: 0,
+};
+function ccLoad() { try { const v = JSON.parse(LS("crl-cc") || "null"); return v && v.user ? v : null; } catch (e) { return null; } }
+function ccSave() { LS("crl-cc", JSON.stringify(CC.cfg)); }
+const ccNorm = s => String(s || "").trim().toLowerCase();
+
+// a key that matches the same game whether it was pasted or synced
+function matchKey(white, black, date, ucis) {
+  return [ccNorm(white), ccNorm(black), String(date || "").replace(/\./g, "-"), ucis.join("")].join("|");
+}
+async function libraryKeys() {
+  const keys = new Set();
+  let datas = null;
+  for (const [id, m] of S.games) {
+    if (m.mkey) { keys.add(m.mkey); continue; }
+    if (!datas) { try { datas = await store.all("analyses"); } catch (e) { datas = new Map(); } }
+    const d = S.data.get(id) || datas.get(id);
+    if (!d) continue;
+    m.mkey = matchKey(m.white, m.black, m.date, d.moves.map(x => x.uci));
+    keys.add(m.mkey);
+    store.put("games", id, m).catch(() => {});
+  }
+  return keys;
+}
+async function ccFetch(url) {
+  let r;
+  try { r = await fetch(url, { cache: "no-cache" }); }
+  catch (e) { throw new Error(navigator.onLine === false ? "You're offline. Your saved games are still here." : "Couldn't reach chess.com. Check your connection and try again."); }
+  if (r.status === 404) { const e = new Error("not_found"); e.code = 404; throw e; }
+  if (r.status === 429) throw new Error("chess.com is busy right now. Try again in a minute.");
+  if (!r.ok) throw new Error(`chess.com didn't answer (error ${r.status}). Try again later.`);
+  return r.json();
+}
+const TCLASS = { bullet: "Bullet", blitz: "Blitz", rapid: "Rapid", daily: "Daily" };
+async function ccSync({ quiet = false } = {}) {
+  if (!CC.cfg || CC.syncing) return;
+  CC.syncing = true; CC.status = "Checking chess.com…"; renderCC();
+  try {
+    const user = ccNorm(CC.cfg.user);
+    const { archives = [] } = await ccFetch(CC_API + encodeURIComponent(user) + "/games/archives");
+    const months = archives.slice(-2).reverse();
+    const raw = [];
+    for (const u of months) { const j = await ccFetch(u); (j.games || []).forEach(g => raw.push(g)); }
+    const keys = await libraryKeys();
+    const skip = new Set(CC.cfg.skip || []);
+    const list = [];
+    for (const g of raw) {
+      if (!g || !g.pgn || (g.rules && g.rules !== "chess") || skip.has(g.url)) continue;
+      let game;
+      try { game = parseGame(splitGames(g.pgn)[0]); } catch (e) { continue; }
+      const h = game.headers;
+      const mkey = matchKey(h.White, h.Black, h.Date, game.moves.map(m => m.uci));
+      if (keys.has(mkey)) continue;
+      const meW = ccNorm(g.white && g.white.username) === user;
+      const me = meW ? g.white : g.black, opp = meW ? g.black : g.white;
+      const res = (me && me.result) || "";
+      const outcome = res === "win" ? "win" : ["checkmated", "resigned", "timeout", "abandoned", "lose"].includes(res) ? "loss" : res ? "draw" : "";
+      list.push({
+        url: g.url, end: g.end_time || 0, pgn: g.pgn, game, mkey, outcome,
+        opp: (opp && opp.username) || "?", oppElo: (opp && opp.rating) || "",
+        tclass: TCLASS[g.time_class] || "", tc: g.time_control || "", date: (h.Date || "").replace(/\./g, "-"),
+      });
+    }
+    list.sort((a, b) => b.end - a.end);
+    CC.recent = list;
+    CC.cfg.lastSync = Date.now();
+    if (CC.cfg.since == null) {
+      // first sync after linking: analyze the 3 most recent games, list the rest
+      CC.cfg.since = list.length > 3 ? list[3].end : 0;
+    }
+    ccSave();
+    CC.status = "";
+    if (CC.cfg.auto) {
+      const fresh = list.filter(x => x.end > CC.cfg.since);
+      if (fresh.length) ccEnqueue(fresh.slice().reverse());
+    }
+  } catch (e) {
+    CC.status = e.code === 404 ? `chess.com has no player named “${CC.cfg.user}”.` : e.message;
+    if (!quiet) toast(CC.status, 4000);
+  } finally {
+    CC.syncing = false; renderCC();
+  }
+}
+async function ccLink(name) {
+  const err = $("#ccErr"); if (err) err.hidden = true;
+  const user = ccNorm(name);
+  if (!/^[a-z0-9_-]{3,25}$/.test(user)) { if (err) { err.textContent = "Enter your chess.com username (3–25 letters, numbers, - or _)."; err.hidden = false; } return; }
+  const btn = $("#ccLinkBtn"); if (btn) { btn.disabled = true; btn.textContent = "Checking…"; }
+  try {
+    const p = await ccFetch(CC_API + encodeURIComponent(user));
+    CC.cfg = { user: p.username || user, since: null, auto: true, depth: 14, lastSync: 0, skip: [] };
+    ccSave(); LS("crl-user", CC.cfg.user);
+    $("#userLine").textContent = `${CC.cfg.user} · Stockfish 19 review`;
+    renderCC(); toast(`Linked ${CC.cfg.user}. Loading your games…`);
+    ccSync();
+  } catch (e) {
+    if (err) { err.textContent = e.code === 404 ? `chess.com has no player named “${name}”. Check the spelling.` : e.message; err.hidden = false; }
+    if (btn) { btn.disabled = false; btn.textContent = "Link account"; }
+  }
+}
+function ccUnlink() {
+  ccCancel(); CC.cfg = null; CC.recent = []; CC.status = "";
+  try { localStorage.removeItem("crl-cc"); } catch (e) {}
+  renderCC(); toast("chess.com account unlinked. Your analyzed games stay in the app.");
+}
+
+// ---------- analysis queue (runs in the background of the library) ----------
+function ccEnqueue(items) {
+  const have = new Set([...CC.queue.map(x => x.url), CC.running && CC.running.url]);
+  items.forEach(x => { if (!have.has(x.url)) { CC.queue.push(x); have.add(x.url); CC.total++; } });
+  renderCC();
+  if (!CC.running) ccRun();
+}
+function ccCancel() {
+  if (CC.cancel) CC.cancel.v = true;
+  CC.queue = []; CC.total = 0; CC.done = 0;
+}
+async function ccRun() {
+  keepAwake(true);
+  while (CC.queue.length) {
+    const item = CC.queue.shift();
+    CC.running = item; CC.cancel = { v: false }; CC.pct = 0; renderCC();
+    try {
+      await engine.start();
+      const rec = await analyzeGame(item.game, {
+        player: CC.cfg ? CC.cfg.user : "", depth: (CC.cfg && CC.cfg.depth) || 14, cancel: CC.cancel,
+        onProgress: (d, t) => { CC.pct = Math.round(100 * d / t); const b = $("#ccProg"); if (b) b.style.width = CC.pct + "%"; },
+      }, engine);
+      rec.meta.mkey = item.mkey; rec.meta.fresh = true; rec.meta.source = "chess.com";
+      if (item.url) rec.meta.link = item.url;
+      const id = gameId(item.game);
+      const prev = S.games.get(id); if (prev) { rec.meta.notes = prev.notes || {}; rec.meta.summary = prev.summary || ""; }
+      await saveGame(id, rec);
+      CC.recent = CC.recent.filter(x => x.url !== item.url);
+      CC.done++;
+    } catch (e) {
+      if (e.message === "cancelled") break;
+      if (CC.cfg) { CC.cfg.skip = [...(CC.cfg.skip || []), item.url].slice(-200); ccSave(); }
+      CC.recent = CC.recent.filter(x => x.url !== item.url);
+    }
+    CC.running = null;
+    if (!$("#libView").hidden) renderLibrary(); else renderCC();
+  }
+  const n = CC.done;
+  CC.running = null; CC.queue = []; CC.total = 0; CC.done = 0; CC.cancel = null;
+  if (!cancelTok) keepAwake(false);
+  renderCC();
+  if (n) toast(`${n} new game${n > 1 ? "s" : ""} analyzed`);
+}
+
+// ---------- card ----------
+function ago(ts) {
+  if (!ts) return "never";
+  const s = Math.round((Date.now() - ts) / 1000);
+  if (s < 60) return "just now"; if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`; return `${Math.round(s / 86400)} d ago`;
+}
+function renderCC() {
+  const el = $("#ccCard"); if (!el) return;
+  if (!CC.cfg) {
+    el.innerHTML = `<h2>Link your chess.com account</h2>
+     <p class="note">Your recent games load automatically, and new ones get analyzed each time you open the app.</p>
+     <form id="ccForm" class="ccform"><input id="ccUser" aria-label="chess.com username" placeholder="chess.com username" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(LS("crl-user") || "hckymstr19")}"><button id="ccLinkBtn" class="btn primary">Link account</button></form>
+     <p id="ccErr" class="err" hidden></p>`;
+    $("#ccForm").addEventListener("submit", e => { e.preventDefault(); ccLink($("#ccUser").value); });
+    return;
+  }
+  const c = CC.cfg;
+  const busy = CC.running || CC.queue.length;
+  const queued = new Set(CC.queue.map(x => x.url));
+  const pend = CC.recent.filter(x => !queued.has(x.url) && !(CC.running && CC.running.url === x.url));
+  const shown = CC.showAll ? pend : pend.slice(0, 5);
+  const row = x => `<div class="ccrow">
+     <span class="res sm ${x.outcome}">${x.outcome === "win" ? "W" : x.outcome === "loss" ? "L" : x.outcome === "draw" ? "D" : "?"}</span>
+     <span class="gt"><b>vs ${esc(x.opp)}${x.oppElo ? ` (${esc(x.oppElo)})` : ""}</b><span>${[x.date, x.tclass, tcLabel(x.tc)].filter(Boolean).map(esc).join(" · ")}</span></span>
+     <button class="btn sm" data-cc-analyze="${esc(x.url)}">Analyze</button></div>`;
+  el.innerHTML = `<div class="cchead">
+     <div class="gt"><b>chess.com · ${esc(c.user)}</b><span>${CC.syncing ? "Checking for new games…" : esc(CC.status) || `Synced ${ago(c.lastSync)}`}</span></div>
+     <button class="btn sm" data-act="ccsync" ${CC.syncing ? "disabled" : ""}>Sync</button>
+   </div>
+   ${busy ? `<div class="ccq"><div class="gt"><b>Analyzing ${CC.done + 1} of ${CC.total}${CC.running ? `: vs ${esc(CC.running.opp)}` : ""}</b><span>Keep the app open. You can browse your games meanwhile.</span></div>
+       <button class="btn sm ghost" data-act="ccstop">Stop</button><div class="prog" style="grid-column:1/-1"><i id="ccProg" style="width:${CC.pct || 0}%"></i></div></div>` : ""}
+   ${pend.length ? `<div class="cclist"><div class="cclisthead"><span class="eyebrow">Not analyzed yet · ${pend.length}</span>${pend.length > 1 ? `<button class="btn sm" data-act="ccall">Analyze all</button>` : ""}</div>${shown.map(row).join("")}
+       ${pend.length > 5 ? `<button class="btn sm ghost" data-act="ccmore">${CC.showAll ? "Show fewer" : `Show all ${pend.length}`}</button>` : ""}</div>`
+     : (!CC.syncing && !busy && c.lastSync && !CC.status ? `<p class="note">You're up to date. Games you play on chess.com show up here.</p>` : "")}
+   <details class="ccset"><summary>Sync settings</summary>
+     <label class="chk"><input type="checkbox" id="ccAuto" ${c.auto ? "checked" : ""}> Analyze new games automatically</label>
+     <label for="ccDepth">Depth for synced games<select id="ccDepth"><option value="12">Quick (12)</option><option value="14">Standard (14)</option><option value="16">Thorough (16)</option></select></label>
+     <button class="btn sm ghost danger" data-act="ccunlink">Unlink chess.com account</button>
+   </details>`;
+  $("#ccDepth").value = String(c.depth || 14);
+  $("#ccAuto").onchange = e => { c.auto = e.target.checked; ccSave(); if (c.auto) ccSync({ quiet: true }); };
+  $("#ccDepth").onchange = e => { c.depth = +e.target.value; ccSave(); };
+}
+document.addEventListener("click", e => {
+  const t = e.target.closest("button"); if (!t) return;
+  if (t.dataset.ccAnalyze) { const x = CC.recent.find(r => r.url === t.dataset.ccAnalyze); if (x) ccEnqueue([x]); return; }
+  const a = t.dataset.act;
+  if (a === "ccsync") ccSync();
+  if (a === "ccstop") { ccCancel(); renderCC(); toast("Stopped. Unanalyzed games stay in the list."); }
+  if (a === "ccall") { const queued = new Set(CC.queue.map(x => x.url)); ccEnqueue(CC.recent.filter(x => !queued.has(x.url)).slice().reverse()); }
+  if (a === "ccmore") { CC.showAll = !CC.showAll; renderCC(); }
+  if (a === "ccunlink") ccUnlink();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && CC.cfg && !CC.syncing && Date.now() - (CC.cfg.lastSync || 0) > 120000) ccSync({ quiet: true });
+});
+function ccInit() {
+  CC.cfg = ccLoad();
+  renderCC();
+  if (CC.cfg) ccSync({ quiet: true });
+}
+
 // ---------- boot ----------
 (async () => {
   const u = LS("crl-user") || "hckymstr19"; $("#userLine").textContent = `${u} · Stockfish 19 review`;
@@ -785,6 +1012,7 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
   }
   dbReady = true;
   renderLibrary();
+  ccInit();
   // shared from another app (Android share sheet)
   const qs = new URLSearchParams(location.search);
   const shared = [qs.get("text"), qs.get("title"), qs.get("url")].filter(Boolean).join("\n").trim();
