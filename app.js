@@ -87,6 +87,7 @@ async function patchMeta(id, patch) {
   await store.put("games", id, m);
 }
 
+
 // ---------- engine (Stockfish 19 lite, WASM, in a worker) ----------
 class BrowserEngine {
   constructor() { this.q = Promise.resolve(); this.ready = null; this.ls = []; }
@@ -132,57 +133,140 @@ class BrowserEngine {
 const engine = new BrowserEngine();
 
 
-// ---------- library ----------
+// ---------- library: tabs ----------
+S.tab = "Games";
+function setTab(t) {
+  S.tab = t;
+  ["Games", "Insights", "Settings"].forEach(x => { $("#tab" + x).hidden = x !== t; });
+  document.querySelectorAll("#tabbar button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
+  if (t === "Insights") renderInsights();
+  if (t === "Settings") { renderCC(); renderCount(); }
+  window.scrollTo(0, 0);
+}
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+function tcLabel(tc) {
+  const s = String(tc || "");
+  if (/^1\/\d+$/.test(s)) return `${Math.round(+s.split("/")[1] / 86400)} day${+s.split("/")[1] > 86400 ? "s" : ""}`;
+  const m = s.match(/^(\d+)(?:\+(\d+))?$/); if (!m) return s;
+  const b = +m[1]; return `${b >= 60 ? Math.round(b / 60) : b + "s"}|${m[2] || 0}`;
+}
+function tcClass(tc) {
+  const s = String(tc || ""); if (/^1\//.test(s)) return "Daily";
+  const m = s.match(/^(\d+)(?:\+(\d+))?$/); if (!m) return "";
+  const t = +m[1] + 40 * +(m[2] || 0);
+  return t < 180 ? "Bullet" : t < 600 ? "Blitz" : t < 3600 ? "Rapid" : "Classical";
+}
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS_L = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function shortDate(d) { const m = String(d || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${MONTHS[+m[2] - 1]} ${+m[3]}` : (d || ""); }
+function monthKey(d) { const m = String(d || "").match(/^(\d{4})-(\d{2})/); return m ? `${MONTHS_L[+m[2] - 1]} ${m[1]}` : "Undated"; }
+function shortOpening(o) { return String(o || "").split(/[,:]/)[0].trim(); }
+function oppName(m) { return m.side === "w" ? m.black : m.side === "b" ? m.white : null; }
 function sortedGames() {
   return [...S.games.entries()].sort((a, b) => (b[1].date || "").localeCompare(a[1].date || "") || (b[1].createdAt || "").localeCompare(a[1].createdAt || ""));
 }
-function oppName(m) { return m.side === "w" ? m.black : m.side === "b" ? m.white : null; }
+function renderCount() { const n = S.games.size; const el = $("#countNote"); if (el) el.textContent = `${n} game${n === 1 ? "" : "s"}`; }
+function gameRow(id, m) {
+  const me = m.side; const c = me ? m.counts?.[me] : null;
+  const resTxt = m.outcome === "win" ? "W" : m.outcome === "loss" ? "L" : m.outcome === "draw" ? "D" : (/^(1-0|0-1|1\/2-1\/2)$/.test(m.result || "") ? esc(m.result === "1/2-1/2" ? "½" : m.result) : "–");
+  const opp = me ? oppName(m) : `${m.white} vs ${m.black}`;
+  const oppElo = me ? (me === "w" ? m.blackElo : m.whiteElo) : "";
+  const sub = [shortOpening(m.opening), tcClass(m.tc), shortDate(m.date)].filter(Boolean).map(esc).join(" · ");
+  return `<button class="row" data-open="${esc(id)}">
+    <span class="res ${m.outcome || ""}">${resTxt}</span>
+    <span class="gt"><b>${esc(opp)}${oppElo ? ` <span class="elo">${esc(oppElo)}</span>` : ""}</b><span>${sub}</span></span>
+    <span class="gs">${me ? `<span class="acc">${Math.round(m.acc[me])}%</span>` : ""}<span class="marks">${m.fresh ? '<span class="mk new">New</span>' : ""}${c && c.blunder ? `<span class="mk blunder">${c.blunder}??</span>` : ""}${c && c.mistake ? `<span class="mk mistake">${c.mistake}?</span>` : ""}</span></span>
+  </button>`;
+}
 function renderLibrary() {
-  const list = sortedGames();
-  const gl = $("#gameList"), pt = $("#patterns");
-  $("#countNote").textContent = list.length ? `${list.length} game${list.length > 1 ? "s" : ""} saved on this device` : "";
+  renderCount();
+  if (S.tab === "Insights") renderInsights();
+  const list = sortedGames(), gl = $("#gameList");
   if (!list.length) {
-    pt.innerHTML = "";
-    gl.innerHTML = `<div class="card empty"><h2 style="font-size:20px">${dbReady ? "No games yet" : "Loading your games…"}</h2>
-      <p class="note" style="max-width:52ch">Paste a game from chess.com and the engine will go through every move, mark your mistakes, and show what was better. Your patterns build up here as you add games.</p>
-      <button class="btn primary" data-act="new">+ Analyze a game</button></div>`;
+    gl.innerHTML = `<div class="card empty"><h2>${dbReady ? "No games yet" : "Loading your games…"}</h2>
+      <p class="note" style="max-width:40ch">Link your chess.com account in Settings to load games automatically, or paste a game and the engine will go through every move.</p>
+      <div class="inrow" style="justify-content:center"><button class="btn primary" data-act="new">Paste a game</button><button class="btn" data-tabgo="Settings">Link chess.com</button></div></div>`;
     return;
   }
-  // patterns
-  const mine = list.map(([, m]) => m).filter(m => m.side);
+  const groups = new Map();
+  list.forEach(([id, m]) => { const k = monthKey(m.date); if (!groups.has(k)) groups.set(k, []); groups.get(k).push([id, m]); });
+  gl.innerHTML = [...groups.entries()].map(([k, rows]) => `<div class="stack"><div class="sh">${esc(k)}<span>${rows.length} game${rows.length > 1 ? "s" : ""}</span></div>
+    <div class="card list">${rows.map(([id, m]) => gameRow(id, m)).join("")}</div></div>`).join("");
+}
+
+// ---------- insights ----------
+const PRACTICE = {
+  "ignored the threat": ["Before every move, ask what your opponent's last move threatens.", "defensiveMove", "Defensive moves"],
+  "failed to punish the opponent's error": ["When your opponent slips, slow down and look for checks, captures and attacks first.", "advantage", "Winning advantage"],
+  "missed a tactic": ["Scan checks, captures and attacks for both sides before settling on a quiet move.", "short", "Short tactics"],
+  "missed a capture": ["Look at every capture on the board before you move.", "hangingPiece", "Hanging pieces"],
+  "exposes the king": ["Keep your king sheltered. Count your opponent's possible checks before opening lines near it.", "defensiveMove", "Defensive moves"],
+  "loses material to the reply": ["Before you let go of a piece, check that it's safe and that nothing else is left hanging.", "hangingPiece", "Hanging pieces"],
+  "hangs the piece it moved": ["Before you let go of a piece, check that its new square is defended.", "hangingPiece", "Hanging pieces"],
+  "leaves a piece undefended": ["When a piece moves, check what it was protecting.", "hangingPiece", "Hanging pieces"],
+  "walks into a fork": ["Watch for knight and queen moves that hit two of your pieces at once.", "fork", "Forks"],
+  "missed a fork": ["Look for moves that attack two things at once, especially with knights.", "fork", "Forks"],
+  "allows forced mate": ["Look at every check your opponent has before you move.", "mateIn2", "Mate in 2"],
+  "missed forced mate": ["Look for checks first. Mating patterns are worth drilling.", "mateIn2", "Mate in 2"],
+  "time trouble": ["Spend less time early so you have enough for the critical moments.", null, null],
+  "moved too fast": ["Take a few seconds on every move, especially right after your opponent's.", null, null],
+};
+function renderInsights() {
+  const el = $("#tabInsights");
+  const mine = sortedGames().map(([, m]) => m).filter(m => m.side);
+  if (!mine.length) {
+    el.innerHTML = `<h1>Insights</h1><div class="card empty"><h2>Nothing to show yet</h2><p class="note">Analyze a few games and your patterns show up here.</p></div>`;
+    return;
+  }
   const n = mine.length;
   const W = mine.filter(m => m.outcome === "win").length, L = mine.filter(m => m.outcome === "loss").length, D = mine.filter(m => m.outcome === "draw").length;
-  const acc = n ? mine.reduce((a, m) => a + (m.acc?.[m.side] || 0), 0) / n : 0;
-  const errs = n ? mine.reduce((a, m) => a + (m.counts?.[m.side]?.blunder || 0) + (m.counts?.[m.side]?.mistake || 0), 0) / n : 0;
+  const acc = mine.reduce((a, m) => a + (m.acc?.[m.side] || 0), 0) / n;
+  const errs = mine.reduce((a, m) => a + (m.counts?.[m.side]?.blunder || 0) + (m.counts?.[m.side]?.mistake || 0), 0) / n;
   const tags = {}, phase = {};
-  mine.forEach(m => { Object.entries(m.myTags || {}).forEach(([k, v]) => { if (!k.startsWith("no simple")) tags[k] = (tags[k] || 0) + v; }); Object.entries(m.myPhase || {}).forEach(([k, v]) => phase[k] = (phase[k] || 0) + v); });
-  const top = Object.entries(tags).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  mine.forEach(m => {
+    Object.entries(m.myTags || {}).forEach(([k, v]) => { if (!k.startsWith("no simple")) tags[k] = (tags[k] || 0) + v; });
+    Object.entries(m.myPhase || {}).forEach(([k, v]) => phase[k] = (phase[k] || 0) + v);
+  });
+  const top = Object.entries(tags).sort((a, b) => b[1] - a[1]).slice(0, 4);
   const mx = top.length ? top[0][1] : 1;
   const ph = ["opening", "middlegame", "endgame"].map(k => [k, phase[k] || 0]);
   const pmx = Math.max(1, ...ph.map(x => x[1]));
-  pt.innerHTML = n ? `
-   <section class="card pcard"><h2>What to work on</h2>
-    <p class="note">Most frequent problems in your mistakes, across ${n} game${n > 1 ? "s" : ""}.</p>
-    <div class="bars">${top.map(([k, v]) => `<div class="brow"><span class="t">${esc(cap(k))}</span><span class="track"><i style="width:${(v / mx) * 100}%"></i></span><span class="c">${v}</span></div>`).join("") || '<p class="note">No mistakes flagged yet.</p>'}</div>
-   </section>
-   <section class="card pcard"><h2>Overview</h2>
-    <div class="kpis"><div class="kpi"><b>${W}–${D}–${L}</b><span>W–D–L</span></div><div class="kpi"><b>${acc.toFixed(0)}%</b><span>Avg accuracy</span></div><div class="kpi"><b>${errs.toFixed(1)}</b><span>Mistakes + blunders / game</span></div></div>
-    <div class="bars">${ph.map(([k, v]) => `<div class="brow"><span class="t">${cap(k)}</span><span class="track"><i style="width:${(v / pmx) * 100}%;background:var(--mistake)"></i></span><span class="c">${v}</span></div>`).join("")}</div>
-    <p class="note">Where your mistakes and blunders happen.</p>
-   </section>` : "";
-  gl.innerHTML = list.map(([id, m]) => {
-    const me = m.side; const c = me ? m.counts?.[me] : null;
-    const resTxt = m.outcome === "win" ? "W" : m.outcome === "loss" ? "L" : m.outcome === "draw" ? "D" : esc(m.result);
-    const title = me ? `vs ${esc(oppName(m))}${(me === "w" ? m.blackElo : m.whiteElo) ? ` (${esc(me === "w" ? m.blackElo : m.whiteElo)})` : ""}` : `${esc(m.white)} vs ${esc(m.black)}`;
-    return `<button class="card gitem" data-open="${esc(id)}">
-     <span class="res ${m.outcome || ""}">${resTxt}</span>
-     <span class="gt"><b>${title}</b><span>${[m.date, me ? (me === "w" ? "White" : "Black") : "", m.opening, tcLabel(m.tc)].filter(Boolean).map(esc).join(" · ")}</span></span>
-     <span class="gs">${m.fresh ? '<span class="pill new">New</span>' : ""}${me ? `<span>${Math.round(m.acc[me])}%</span>` : ""}<span class="row">${c && c.blunder ? `<span class="pill blunder">${c.blunder}??</span>` : ""}${c && c.mistake ? `<span class="pill mistake">${c.mistake}?</span>` : ""}</span></span>
-    </button>`;
-  }).join("");
+  const byColor = c => { const g = mine.filter(m => m.side === c); if (!g.length) return null;
+    return { n: g.length, w: g.filter(m => m.outcome === "win").length, d: g.filter(m => m.outcome === "draw").length, l: g.filter(m => m.outcome === "loss").length, acc: g.reduce((a, m) => a + m.acc[c], 0) / g.length }; };
+  const cw = byColor("w"), cb = byColor("b");
+  const colorCell = (lbl, x) => `<div><span>${lbl}</span>${x ? `<b>${x.w}–${x.d}–${x.l}</b><span>${Math.round(x.acc)}% accuracy · ${x.n} game${x.n > 1 ? "s" : ""}</span>` : `<b>–</b><span>No games yet</span>`}</div>`;
+  el.innerHTML = `<h1>Insights</h1>
+   <div class="card tiles">
+    <div class="tile"><b>${n}</b><span>Games</span></div>
+    <div class="tile"><b>${W}–${D}–${L}</b><span>Won–Drawn–Lost</span></div>
+    <div class="tile"><b>${Math.round(acc)}%</b><span>Avg accuracy</span></div>
+    <div class="tile"><b>${errs.toFixed(1)}</b><span>Mistakes per game</span></div>
+   </div>
+   ${n >= 2 ? `<div class="stack"><div class="sh">Accuracy by game</div><div class="card trend">${trendSvg(mine.slice().reverse())}</div></div>` : ""}
+   <div class="stack"><div class="sh">What to work on</div><div class="card">
+    ${top.length ? top.map(([k, v]) => { const pr = PRACTICE[k] || ["Step through these moments in your games to see the pattern.", null, null];
+      return `<div class="weak"><div class="wt"><b>${esc(cap(k))}</b><span>${v}×</span></div><div class="track"><i style="width:${(v / mx) * 100}%"></i></div>
+        <p>${esc(pr[0])}</p>${pr[1] ? `<a href="https://lichess.org/training/${pr[1]}" target="_blank" rel="noopener">Practice: ${esc(pr[2])} puzzles ↗</a>` : ""}</div>`; }).join("")
+      : `<div class="weak"><p>No mistakes flagged yet. Nice.</p></div>`}
+   </div></div>
+   <div class="stack"><div class="sh">Where mistakes happen</div><div class="card bars">
+    ${ph.map(([k, v]) => `<div class="brow"><span>${cap(k)}</span><span class="track"><i style="width:${(v / pmx) * 100}%"></i></span><span class="c">${v}</span></div>`).join("")}
+   </div></div>
+   <div class="stack"><div class="sh">By color</div><div class="card split">${colorCell("As White", cw)}${colorCell("As Black", cb)}</div></div>`;
 }
-const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
-function tcLabel(tc) { const m = String(tc || "").match(/^(\d+)(?:\+(\d+))?$/); if (!m) return tc || ""; const b = +m[1]; return `${b >= 60 ? Math.round(b / 60) : b + "s"}|${m[2] || 0}`; }
+function trendSvg(games) {
+  const W = 340, H = 120, P = { l: 38, r: 10, t: 10, b: 20 };
+  const v = games.map(m => m.acc[m.side]);
+  const lo = Math.max(0, Math.floor((Math.min(...v) - 5) / 10) * 10), hi = Math.min(100, Math.ceil((Math.max(...v) + 5) / 10) * 10);
+  const x = i => P.l + (W - P.l - P.r) * (games.length === 1 ? 0.5 : i / (games.length - 1));
+  const y = a => P.t + (H - P.t - P.b) * (1 - (a - lo) / Math.max(1, hi - lo));
+  const pts = v.map((a, i) => `${x(i).toFixed(1)},${y(a).toFixed(1)}`).join(" ");
+  const grid = [lo, Math.round((lo + hi) / 2), hi].map(g => `<line class="g" x1="${P.l}" x2="${W - P.r}" y1="${y(g)}" y2="${y(g)}"/><text class="ax" x="${P.l - 6}" y="${y(g) + 3}" text-anchor="end">${g}%</text>`).join("");
+  const xl = `<text class="ax" x="${x(0)}" y="${H - 4}" text-anchor="start">${esc(shortDate(games[0].date))}</text><text class="ax" x="${x(games.length - 1)}" y="${H - 4}" text-anchor="end">${esc(shortDate(games[games.length - 1].date))}</text>`;
+  const area = `M${x(0)},${y(lo)} L${pts.replace(/ /g, " L")} L${x(games.length - 1)},${y(lo)} Z`;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Your accuracy in each game, oldest to newest">${grid}<path class="ar" d="${area}"/><polyline class="ln" points="${pts}"/>
+    ${v.map((a, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(a).toFixed(1)}" r="${i === v.length - 1 ? 4.5 : 3.5}" class="${i === v.length - 1 ? "last" : ""}"/>`).join("")}${xl}</svg>`;
+}
 
 // ---------- game view ----------
 async function openGame(id, push = true) {
@@ -206,19 +290,20 @@ async function openGame(id, push = true) {
   } catch (e) { $("#mPanel").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
 function showView(v) {
-  $("#libView").hidden = v !== "lib"; $("#gameView").hidden = v !== "game";
+  const g = v === "game";
+  $("#libView").hidden = g; $("#gameView").hidden = !g;
+  $("#tabbar").hidden = g; $("#ctrls").hidden = !g;
+  $("#libBar").hidden = g; $("#libBarActs").hidden = g;
+  $("#backBtn").hidden = !g; $("#gameBar").hidden = !g; $("#gameBarActs").hidden = !g;
+  document.documentElement.style.setProperty("--tabbar-h", g ? "64px" : "58px");
   window.scrollTo(0, 0);
 }
 function renderGame() {
   const { meta } = S.cur;
   const me = meta.side;
-  $("#gTitle").textContent = me ? `${meta.outcome ? cap(meta.outcome) : meta.result} vs ${oppName(meta)}` : `${meta.white} vs ${meta.black}`;
-  $("#gMeta").innerHTML = [
-    `${esc(meta.white)}${meta.whiteElo ? ` (${esc(meta.whiteElo)})` : ""} – ${esc(meta.black)}${meta.blackElo ? ` (${esc(meta.blackElo)})` : ""}`,
-    esc(meta.result), esc(meta.date), esc(meta.opening), esc(tcLabel(meta.tc)), `depth ${esc(meta.depth)}`,
-    /^https:\/\/(www\.)?chess\.com\//.test(meta.link || "") ? `<a href="${esc(meta.link)}" target="_blank" rel="noopener">View on chess.com ↗</a>` : "",
-  ].filter(Boolean).map(x => `<span>${x}</span>`).join("");
-  renderMoveList(); renderGraph(); renderSummary(); renderPosition();
+  $("#gTitle").textContent = me ? (meta.outcome ? `${cap(meta.outcome)} vs ${oppName(meta)}` : `vs ${oppName(meta)}`) : `${meta.white} vs ${meta.black}`;
+  $("#gSub").textContent = [shortDate(meta.date), [tcClass(meta.tc), tcLabel(meta.tc)].filter(Boolean).join(" "), shortOpening(meta.opening)].filter(Boolean).join(" · ");
+  renderMoveStrip(); renderGraph(); renderSummary(); renderPosition();
 }
 function setP(p) {
   if (!S.cur) return;
@@ -228,24 +313,41 @@ function setP(p) {
 }
 function curMove() { return S.p > 0 ? S.cur.data.moves[S.p - 1] : null; }
 function renderPosition() {
-  renderBoard(); renderPanel(); renderCoach(); markList(); markGraph(); renderLineBar();
+  renderBoard(); renderPlayers(); renderPanel(); renderCoach(); markStrip(); markGraph(); renderLineBar();
   $("#hintBtn").classList.toggle("on", S.hint);
 }
 
-// board
-function sqXY(sq) { // returns display col,row 0..7
-  const f = sq.charCodeAt(0) - 97, r = +sq[1] - 1;
-  return S.flip ? [7 - f, r] : [f, 7 - r];
+// player bars with clocks
+function clockAt(color, p) {
+  const ms = S.cur.data.moves; let c = null;
+  for (let i = 0; i < p && i < ms.length; i++) if (ms[i].color === color && ms[i].clk != null) c = ms[i].clk;
+  if (c == null) { const m = String(S.cur.meta.tc || "").match(/^(\d+)/); if (m && ms.some(x => x.clk != null)) c = +m[1]; }
+  return c;
 }
+function renderPlayers() {
+  const m = S.cur.meta;
+  const bar = color => {
+    const name = color === "w" ? m.white : m.black, elo = color === "w" ? m.whiteElo : m.blackElo;
+    const p = S.line ? S.p : S.p; const clk = clockAt(color, p);
+    const base = +(String(m.tc || "").match(/^(\d+)/) || [0, 0])[1];
+    const low = clk != null && base && clk < Math.min(60, base * 0.1);
+    return `<span class="pc-dot ${color}" aria-hidden="true"></span><span class="nm">${esc(name)}${elo ? ` <span class="elo">${esc(elo)}</span>` : ""}</span>${m.side === color ? '<span class="you">You</span>' : ""}${clk != null ? `<span class="clk${low ? " low" : ""}">${fmtClock(clk)}</span>` : ""}`;
+  };
+  const topColor = S.flip ? "w" : "b";
+  $("#pTop").innerHTML = bar(topColor); $("#pBot").innerHTML = bar(topColor === "w" ? "b" : "w");
+}
+
+// board
+function sqXY(sq) { const f = sq.charCodeAt(0) - 97, r = +sq[1] - 1; return S.flip ? [7 - f, r] : [f, 7 - r]; }
 function renderBoard() {
   const g = S.cur; const mv = curMove();
-  let fen, last = null, arrows = [];
+  let fen, last = null, arrows = [], mark = null;
   if (S.line) {
     fen = S.line.fens[S.line.k]; if (S.line.k > 0) last = S.line.ucis[S.line.k - 1];
   } else if (S.better && mv) {
     fen = mv.fen; arrows.push([mv.uci, "bad"]); if (mv.bestUci && mv.bestUci !== mv.uci) arrows.push([mv.bestUci, "best"]);
   } else {
-    fen = g.fens[S.p]; if (mv) last = mv.uci;
+    fen = g.fens[S.p]; if (mv) { last = mv.uci; mark = [mv.uci.slice(2, 4), verdict(mv)[0]]; }
     if (mv && mv.cls && mv.refutUci && mv.refutUci[0]) arrows.push([mv.refutUci[0], "bad"]);
     if (S.hint) { const nx = g.data.moves[S.p]; if (nx && nx.bestUci) arrows.push([nx.bestUci, "hint"]); }
   }
@@ -253,21 +355,20 @@ function renderBoard() {
   const hl = last ? [last.slice(0, 2), last.slice(2, 4)] : [];
   let h = '<div class="sqs">';
   for (let row = 0; row < 8; row++) for (let col = 0; col < 8; col++) {
-    const f = S.flip ? 7 - col : col, r = S.flip ? row : 7 - row; // r: 0=rank1
+    const f = S.flip ? 7 - col : col, r = S.flip ? row : 7 - row;
     const name = "abcdefgh"[f] + (r + 1);
     const pc = bd[7 - r][f];
-    const light = (f + r) % 2 === 1;
-    h += `<div class="sq ${light ? "l" : "d"}${hl.includes(name) ? " hl" : ""}">`;
+    h += `<div class="sq ${(f + r) % 2 === 1 ? "l" : "d"}${hl.includes(name) ? " hl" : ""}">`;
     if (col === 0) h += `<span class="co r">${r + 1}</span>`;
     if (row === 7) h += `<span class="co f">${"abcdefgh"[f]}</span>`;
     if (pc) h += `<span class="pc ${pc.color}${pc.type}"></span>`;
+    if (mark && mark[0] === name && mark[1] !== "good") h += `<span class="glyph glyph-on ${mark[1]}" aria-hidden="true">${GLYPH[mark[1]]}</span>`;
     h += "</div>";
   }
   h += "</div>";
   h += '<svg class="arrows" viewBox="0 0 800 800" aria-hidden="true">' + arrows.map(([u, cls]) => arrowSvg(u, cls)).join("") + "</svg>";
   const b = $("#board"); b.innerHTML = h;
   b.setAttribute("aria-label", "Position: " + fen);
-  // eval bar
   let wW = 50, txt = "";
   if (!S.line) {
     if (S.better && mv) { wW = mv.color === "w" ? mv.wb : 100 - mv.wb; txt = mv.evB; }
@@ -277,66 +378,80 @@ function renderBoard() {
   eb.querySelector(".fill").style.height = wW + "%";
   const whiteAhead = wW >= 50;
   const lo = eb.querySelector(".lo"), hi = eb.querySelector(".hi");
-  const raw = String(txt);
-  const num = parseFloat(raw);
-  const shown = /^#/.test(raw) ? "M" + raw.replace(/^#-?/, "") : isNaN(num) ? raw.replace(/^\+/, "") : Math.abs(num) >= 10 ? String(Math.round(Math.abs(num))) : Math.abs(num).toFixed(1);
-  // label sits in the leader's color region
+  const shown = evShort(txt);
   const leaderAtBottom = whiteAhead !== S.flip;
   lo.textContent = leaderAtBottom ? shown : ""; hi.textContent = leaderAtBottom ? "" : shown;
   lo.style.color = whiteAhead ? "var(--bar-b)" : "var(--bar-w)"; hi.style.color = whiteAhead ? "var(--bar-b)" : "var(--bar-w)";
+}
+function evShort(t) {
+  const raw = String(t || ""); const num = parseFloat(raw);
+  if (/^#/.test(raw)) return "M" + raw.replace(/^#-?/, "");
+  if (isNaN(num)) return raw.replace(/^\+/, "");
+  const a = Math.abs(num); return a >= 10 ? String(Math.round(a)) : a.toFixed(1);
+}
+function evSigned(t) {
+  const raw = String(t || ""); const num = parseFloat(raw);
+  if (/^#/.test(raw)) return raw.startsWith("#-") ? "−M" + raw.slice(2) : "M" + raw.slice(1);
+  if (isNaN(num)) return raw;
+  return (num > 0 ? "+" : num < 0 ? "−" : "") + Math.abs(num).toFixed(Math.abs(num) >= 10 ? 0 : 1);
 }
 function arrowSvg(u, cls) {
   if (!u || u.length < 4) return "";
   const [c1, r1] = sqXY(u.slice(0, 2)), [c2, r2] = sqXY(u.slice(2, 4));
   const x1 = c1 * 100 + 50, y1 = r1 * 100 + 50, x2 = c2 * 100 + 50, y2 = r2 * 100 + 50;
   const dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
-  const hx = x2 - ux * 30, hy = y2 - uy * 30; // head base
-  const sx = x1 + ux * 18, sy = y1 + uy * 18;
-  const px = -uy * 24, py = ux * 24;
+  const hx = x2 - ux * 30, hy = y2 - uy * 30, sx = x1 + ux * 18, sy = y1 + uy * 18, px = -uy * 24, py = ux * 24;
   return `<g class="${cls}"><line x1="${sx}" y1="${sy}" x2="${hx}" y2="${hy}"/><polygon points="${x2 - ux * 4},${y2 - uy * 4} ${hx + px},${hy + py} ${hx - px},${hy - py}"/></g>`;
 }
 
-// move panel
+// move card
 const CLS = { blunder: ["Blunder", "??"], mistake: ["Mistake", "?"], inaccuracy: ["Inaccuracy", "?!"] };
+const GLYPH = { blunder: "??", mistake: "?", inaccuracy: "?!", best: "★", good: "✓" };
 function verdict(m) {
   if (m.cls) return [m.cls, CLS[m.cls][0]];
   if (m.isBest) return ["best", "Best move"];
   return ["good", m.drop < 3 ? "Good move" : "OK move"];
 }
 function moveLabel(m) { return `${m.no}${m.color === "w" ? "." : "…"} ${m.san}`; }
+function fmtClock(s) { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, "0")}`; }
 function renderPanel() {
   const g = S.cur, m = curMove(), el = $("#mPanel");
   if (!m) {
-    el.innerHTML = `<div class="mtitle"><h2>Start</h2></div><p>Step through the game with the arrows or by tapping a move. Your mistakes are marked in the move list and on the graph.</p><p class="note">Tip: ◀ ? and ? ▶ jump straight between your mistakes.</p>`;
+    const me = g.meta.side; const n = g.data.moves.filter(x => x.cls && x.cls !== "inaccuracy" && (!me || x.color === me)).length;
+    el.innerHTML = `<div class="mhead"><div class="h"><h2 style="font-family:var(--body)">Starting position</h2><span>${g.data.moves.length} moves · ${n ? `${n} mistake${n > 1 ? "s" : ""} to review` : "no big mistakes"}</span></div></div>
+      <p class="note">Step through with the arrows below, swipe the board, or tap a move. <b>Next mistake</b> jumps straight to your errors.</p>`;
     return;
   }
   const [vc, vt] = verdict(m);
   const mine = !g.meta.side || m.color === g.meta.side;
   const who = g.meta.side ? (mine ? "Your move" : "Opponent's move") : (m.color === "w" ? "White's move" : "Black's move");
-  const dn = m.wa < m.wb - 0.5;
-  let h = `<div class="mtitle"><h2>${esc(moveLabel(m))}</h2><span class="badge ${vc}">${vt}</span><span class="who">${who}</span></div>
-   <div class="evrow"><span>Eval ${esc(m.evB)} → ${esc(m.ev)}</span><span class="${dn ? "dn" : "up"}">${mine && g.meta.side ? "Your" : "Mover's"} winning chances ${Math.round(m.wb)}% → ${Math.round(m.wa)}%</span></div>`;
-  h += '<div class="facts">';
+  const whose = g.meta.side ? (mine ? "Your" : "Their") : (m.color === "w" ? "White's" : "Black's");
+  const wb = Math.round(m.wb), wa = Math.round(m.wa);
+  const impact = m.cls ? `${whose} winning chances dropped from <b>${wb}%</b> to <b>${wa}%</b>.`
+    : vc === "best" ? `The engine's top choice. ${whose} winning chances: <b>${wa}%</b>.`
+    : `${whose} winning chances: <b>${wa}%</b>${wb - wa >= 1 ? ` (from ${wb}%)` : ""}.`;
+  let h = `<div class="mhead"><span class="glyph lg ${vc}" aria-hidden="true">${GLYPH[vc]}</span><div class="h"><h2>${esc(moveLabel(m))}</h2><span>${vt} · ${who}</span></div><span class="evchip" title="Engine evaluation (White's view)">${esc(evSigned(m.ev))}</span></div>
+   <p class="impact ${vc}">${impact}</p><div class="facts">`;
   if (!m.isBest && m.best) {
-    h += `<div class="fact"><span class="k">${m.cls ? "Better was" : "Engine preferred"}</span><span class="v"><b>${esc(m.best)}</b> · ${esc(m.line.slice(0, 6).join(" "))}</span>
-      <span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" data-act="better">${S.better ? "Back to game" : "Show on board"}</button><button class="btn sm" data-act="playbest">Play line</button></span></div>`;
+    h += `<div class="fact"><span class="k">${m.cls ? "Best was" : "Engine preferred"}</span><span class="v"><b>${esc(m.best)}</b>&nbsp; ${esc(m.line.slice(1, 6).join(" "))}</span>
+      <span class="acts2"><button class="btn sm soft" data-act="better">${S.better ? "Hide" : "Show"}</button><button class="btn sm soft" data-act="playbest">Play</button></span></div>`;
   }
   if (m.cls && m.refut && m.refut.length) {
     h += `<div class="fact"><span class="k">How it gets punished</span><span class="v">${esc(m.refut.slice(0, 6).join(" "))}</span>
-      <button class="btn sm" data-act="playrefut">Play line</button></div>`;
+      <span class="acts2"><button class="btn sm soft" data-act="playrefut">Play</button></span></div>`;
   }
   if (m.cls && m.threat) {
-    h += `<div class="fact"><span class="k">Threat before the move</span><span class="v">${esc(m.threat)}${m.tags.some(t => t.startsWith("ignored")) ? " · not addressed" : ""}</span></div>`;
+    const ignored = m.tags.some(t => t.startsWith("ignored"));
+    h += `<div class="fact"><span class="k">Threat before the move</span><span class="v">${esc(m.threat)}${ignored ? ' <span class="note" style="font-family:var(--body)">· not addressed</span>' : ""}</span></div>`;
   }
-  if (m.spent != null || m.clk != null) {
-    h += `<div class="fact"><span class="k">Clock</span><span class="v">${m.spent != null ? `${m.spent}s on this move · ` : ""}${m.clk != null ? fmtClock(m.clk) + " left" : ""}</span></div>`;
-  }
+  if (m.spent != null) h += `<div class="fact"><span class="k">Time</span><span class="v">${m.spent}s on this move${m.clk != null ? ` · ${fmtClock(m.clk)} left` : ""}</span></div>`;
   h += "</div>";
-  if (m.cls && m.tags.length) h += `<div class="tags">${m.tags.map(t => `<span class="tag">${esc(cap(t))}</span>`).join("")}</div>`;
-  if (m.cls && !S.better) h += `<p class="note">Red arrow: the reply that punishes ${esc(m.san)}. “Show on board” puts the better move (blue) next to yours (red).</p>`;
+  const tags = (m.tags || []).filter(t => !t.startsWith("no simple") && !t.startsWith("ignored the threat"));
+  if (m.cls && tags.length) h += `<div class="tags">${tags.map(t => `<span class="tag">${esc(cap(t))}</span>`).join("")}</div>`;
+  if (m.cls && !S.better && !S.line) h += `<p class="note">Red arrow: the reply that punishes ${esc(m.san)}.</p>`;
+  if (S.better) h += `<p class="note">Red: your move. Blue: the engine's best.</p>`;
   el.innerHTML = h;
 }
-function fmtClock(s) { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return `${m}:${String(s % 60).padStart(2, "0")}`; }
 
 // engine lines
 function startLine(fen, ucis, label, wW) {
@@ -346,6 +461,7 @@ function startLine(fen, ucis, label, wW) {
   stopLine();
   S.line = { fens, ucis: ok, sans, k: 0, label, wW };
   playLine();
+  window.scrollTo({ top: 0, behavior: "smooth" });
 }
 let lineTimer = null;
 function stopLine() { if (lineTimer) { clearInterval(lineTimer); lineTimer = null; } }
@@ -373,39 +489,47 @@ function renderLineBar() {
   if (!S.line) { stopLine(); lb.hidden = true; lb.innerHTML = ""; return; }
   lb.hidden = false;
   const L = S.line;
-  const fen0 = L.fens[0]; const white0 = fen0.split(" ")[1] === "w"; let no = +fen0.split(" ")[5];
+  const fen0 = L.fens[0]; const white0 = fen0.split(" ")[1] === "w"; const no = +fen0.split(" ")[5];
   const chips = L.sans.map((s, i) => {
     const isW = white0 ? i % 2 === 0 : i % 2 === 1; const n = no + Math.floor((i + (white0 ? 0 : 1)) / 2);
     const pre = isW ? `${n}.` : (i === 0 ? `${n}…` : "");
     return `<button class="chip${i + 1 === L.k ? " on" : ""}" data-lk="${i + 1}">${pre}${esc(s)}</button>`;
   }).join("");
-  lb.innerHTML = `<div class="top"><b>${esc(L.label)}</b><span style="display:flex;gap:6px"><button class="ib" data-act="lprev" aria-label="Back in line">‹</button><button class="ib" data-act="lplay" aria-label="${lineTimer ? "Pause" : L.k >= L.ucis.length ? "Replay" : "Play"}">${lineTimer ? "❚❚" : L.k >= L.ucis.length ? "↺" : "▶"}</button><button class="ib" data-act="lnext" aria-label="Forward in line">›</button><button class="btn sm" data-act="lexit">Done</button></span></div><div class="chips">${chips}</div>`;
+  const playLbl = lineTimer ? "Pause" : L.k >= L.ucis.length ? "Replay" : "Play";
+  const playIco = lineTimer ? '<path d="M8 5v14M16 5v14"/>' : L.k >= L.ucis.length ? '<path d="M4 12a8 8 0 1 0 2.3-5.7M4 4v4h4"/>' : '<path d="M7 5l12 7-12 7z"/>';
+  lb.innerHTML = `<div class="top"><b>${esc(L.label)}</b><span class="lc">
+    <button class="ib" data-act="lprev" aria-label="Back one move"><svg class="i" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+    <button class="ib" data-act="lplay" aria-label="${playLbl}"><svg class="i" viewBox="0 0 24 24">${playIco}</svg></button>
+    <button class="ib" data-act="lnext" aria-label="Forward one move"><svg class="i" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg></button>
+    <button class="btn sm primary" data-act="lexit">Done</button></span></div><div class="chips">${chips}</div>`;
 }
 
-// move list
-function renderMoveList() {
+// move strip
+function renderMoveStrip() {
   const ms = S.cur.data.moves; let h = "";
-  for (let i = 0; i < ms.length; i++) {
-    const m = ms[i];
-    if (m.color === "w" || i === 0) {
-      h += `<div class="mrow"><span class="n">${m.no}.</span>`;
-      if (m.color === "b") h += `<span></span>`;
-    }
-    h += `<button class="mv" data-ply="${m.ply}">${esc(m.san)}${m.cls ? `<i class="${m.cls}">${CLS[m.cls][1]}</i>` : ""}</button>`;
-    if (m.color === "b" || i === ms.length - 1) { if (m.color === "w") h += "<span></span>"; h += "</div>"; }
-  }
-  $("#mList").innerHTML = h;
+  ms.forEach((m, i) => {
+    if (m.color === "w" || i === 0) h += `<span class="n">${m.no}.${m.color === "b" ? ".." : ""}</span>`;
+    h += `<button class="mv" role="listitem" data-ply="${m.ply}">${esc(m.san)}${m.cls ? `<i class="${m.cls}">${CLS[m.cls][1]}</i>` : ""}</button>`;
+  });
+  $("#mStrip").innerHTML = h;
 }
-function markList() {
-  const list = $("#mList");
-  list.querySelectorAll(".mv.on").forEach(b => b.classList.remove("on"));
-  const b = list.querySelector(`.mv[data-ply="${S.p}"]`);
-  if (b) { b.classList.add("on"); const top = b.offsetTop - list.offsetTop; if (top < list.scrollTop + 10 || top > list.scrollTop + list.clientHeight - 40) list.scrollTop = top - list.clientHeight / 2; }
-  else if (S.p === 0) list.scrollTop = 0;
+function markStrip() {
+  const st = $("#mStrip");
+  st.querySelectorAll(".mv.on").forEach(b => b.classList.remove("on"));
+  const b = st.querySelector(`.mv[data-ply="${S.p}"]`);
+  let left = 0;
+  if (b) {
+    b.classList.add("on");
+    const br = b.getBoundingClientRect(), sr = st.getBoundingClientRect();
+    left = st.scrollLeft + (br.left - sr.left) - sr.width / 2 + br.width / 2;
+  }
+  left = Math.max(0, Math.min(left, st.scrollWidth - st.clientWidth));
+  const near = Math.abs(left - st.scrollLeft) < 240 && !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+  st.scrollTo({ left, behavior: near ? "smooth" : "auto" });
 }
 
 // graph
-const GW = 640, GH = 170, GP = { l: 30, r: 8, t: 8, b: 20 };
+const GW = 640, GH = 150, GP = { l: 26, r: 8, t: 6, b: 18 };
 function gx(i, n) { return GP.l + (GW - GP.l - GP.r) * i / Math.max(1, n); }
 function gy(v) { return GP.t + (GH - GP.t - GP.b) * (1 - v / 100); }
 function renderGraph() {
@@ -414,17 +538,17 @@ function renderGraph() {
   const line = pts.map((v, i) => `${gx(i, n).toFixed(1)},${gy(v).toFixed(1)}`).join(" ");
   const area = `M${gx(0, n)},${gy(0)} L${line.replace(/ /g, " L")} L${gx(n, n)},${gy(0)} Z`;
   let ax = "";
-  [[100, "W"], [50, "="], [0, "B"]].forEach(([v, l]) => { ax += `<line class="g" x1="${GP.l}" x2="${GW - GP.r}" y1="${gy(v)}" y2="${gy(v)}"/><text class="ax" x="${GP.l - 6}" y="${gy(v) + 3}" text-anchor="end">${l}</text>`; });
-  for (let mv = 10; mv * 2 <= n; mv += 10) ax += `<text class="ax" x="${gx(mv * 2, n)}" y="${GH - 6}" text-anchor="middle">${mv}</text>`;
+  [[100, "W"], [50, "="], [0, "B"]].forEach(([v, l]) => { ax += `<text class="ax" x="${GP.l - 6}" y="${gy(v) + 3}" text-anchor="end">${l}</text>`; });
+  ax += `<line class="g" x1="${GP.l}" x2="${GW - GP.r}" y1="${gy(50)}" y2="${gy(50)}" stroke-dasharray="3 4"/>`;
+  for (let mv = 10; mv * 2 <= n; mv += 10) ax += `<text class="ax" x="${gx(mv * 2, n)}" y="${GH - 4}" text-anchor="middle">${mv}</text>`;
   const dots = ms.filter(m => m.cls && m.cls !== "inaccuracy").map(m => {
     const mine = !g.meta.side || m.color === g.meta.side;
-    return `<circle class="d-${m.cls}" cx="${gx(m.ply, n).toFixed(1)}" cy="${gy(m.wW).toFixed(1)}" r="${mine ? 5 : 3.5}" opacity="${mine ? 1 : .55}"/>`;
+    return `<circle class="d-${m.cls}" cx="${gx(m.ply, n).toFixed(1)}" cy="${gy(m.wW).toFixed(1)}" r="${mine ? 5.5 : 3.5}" opacity="${mine ? 1 : .5}"/>`;
   }).join("");
   $("#graph").innerHTML = `<svg viewBox="0 0 ${GW} ${GH}" role="img" aria-label="White's winning chances over the game">
-   <rect class="abk" x="${GP.l}" y="${GP.t}" width="${GW - GP.l - GP.r}" height="${GH - GP.t - GP.b}"/>
+   <rect class="abk" x="${GP.l}" y="${GP.t}" width="${GW - GP.l - GP.r}" height="${GH - GP.t - GP.b}" rx="4"/>
    <path class="aw" d="${area}"/>${ax}<polyline class="ln" points="${line}"/>
-   <line id="gCur" class="cur" x1="0" x2="0" y1="${GP.t}" y2="${GH - GP.b}"/>${dots}
-   <rect class="frame" x="${GP.l}" y="${GP.t}" width="${GW - GP.l - GP.r}" height="${GH - GP.t - GP.b}"/></svg>`;
+   <line id="gCur" class="cur" x1="0" x2="0" y1="${GP.t}" y2="${GH - GP.b}"/>${dots}</svg>`;
   $("#graph svg").addEventListener("click", e => {
     const r = e.currentTarget.getBoundingClientRect(); const x = (e.clientX - r.left) / r.width * GW;
     setP(Math.round((x - GP.l) / (GW - GP.l - GP.r) * n));
@@ -438,16 +562,30 @@ function markGraph() {
 // summary
 function renderSummary() {
   const g = S.cur, m = g.meta, me = m.side;
-  const row = (lbl, w, b) => `<span>${lbl}</span><span class="num">${w}</span><span class="num">${b}</span>`;
-  const cw = m.counts.w, cb = m.counts.b;
+  const opp = me === "w" ? "b" : "w";
+  const cols = me ? [me, opp] : ["w", "b"];
+  const head = me ? ["You", "Opponent"] : ["White", "Black"];
+  const row = (lbl, f) => `<span>${lbl}</span><span class="num">${f(cols[0])}</span><span class="num">${f(cols[1])}</span>`;
   const keys = g.data.moves.filter(x => x.cls && x.cls !== "inaccuracy" && (!me || x.color === me));
-  $("#sumBox").innerHTML = `<h3 style="font-size:17px">Game summary</h3>
-   <div class="sumgrid"><span></span><span class="h">${me === "w" ? "You" : "White"}</span><span class="h">${me === "b" ? "You" : "Black"}</span>
-    ${row("Accuracy", Math.round(m.acc.w) + "%", Math.round(m.acc.b) + "%")}${row("Blunders ??", cw.blunder, cb.blunder)}${row("Mistakes ?", cw.mistake, cb.mistake)}${row("Inaccuracies ?!", cw.inaccuracy, cb.inaccuracy)}</div>
-   <div style="display:grid;gap:6px"><span class="eyebrow">${me ? "Your" : "Key"} mistakes</span>
-    <div class="keys">${keys.map(x => `<button class="chip" data-ply-jump="${x.ply}">${esc(moveLabel(x))}${CLS[x.cls][1]}</button>`).join("") || '<span class="note">None. Clean game.</span>'}</div></div>`;
+  const link = /^https:\/\/(www\.)?chess\.com\//.test(m.link || "") ? m.link : "";
+  $("#sumBox").innerHTML = `<h3 style="font-size:15px">Game summary</h3>
+   <div class="vs"><span></span><span class="h">${head[0]}</span><span class="h">${head[1]}</span>
+    ${row("Accuracy", c => Math.round(m.acc[c]) + "%")}${row("Blunders", c => m.counts[c].blunder)}${row("Mistakes", c => m.counts[c].mistake)}${row("Inaccuracies", c => m.counts[c].inaccuracy)}</div>
+   <div class="stack"><span class="sh" style="padding:0">${me ? "Your" : "Key"} mistakes</span>
+    <div class="keys">${keys.map(x => `<button class="chip" data-ply-jump="${x.ply}"><span class="glyph ${x.cls}" style="min-width:18px;height:18px;font-size:10px">${GLYPH[x.cls]}</span>${esc(moveLabel(x))}</button>`).join("") || '<span class="note">None. Clean game.</span>'}</div></div>
+   <div class="inrow" style="justify-content:space-between;align-items:center">${link ? `<a href="${esc(link)}" target="_blank" rel="noopener" style="font-size:14px;font-weight:600">View on chess.com ↗</a>` : "<span></span>"}<button id="delBtn" class="btn sm ghost danger">Delete game</button></div>`;
+  $("#delBtn").onclick = deleteGame;
 }
-
+let delArm = null;
+async function deleteGame() {
+  const b = $("#delBtn");
+  if (!delArm) { b.textContent = "Tap again to delete"; delArm = setTimeout(() => { delArm = null; if ($("#delBtn")) $("#delBtn").textContent = "Delete game"; }, 4000); return; }
+  clearTimeout(delArm); delArm = null;
+  const id = S.cur.id;
+  try { await store.del("games", id); await store.del("analyses", id); } catch (e) {}
+  S.games.delete(id); S.data.delete(id); S.cur = null;
+  goHome(); toast("Game deleted");
+}
 
 // ---------- coach: hand off to Claude, keep notes ----------
 function movesText(ms, upTo) {
@@ -526,11 +664,11 @@ function renderCoach() {
   const empty = m
     ? `Ask Claude to explain ${esc(moveLabel(m))}. Claude opens with the engine analysis filled in; paste the answer back here to keep it.`
     : "Ask Claude for a write-up of how the game was decided and the lessons to take from it.";
-  box.innerHTML = `<h3>${title}</h3>
-   ${editing ? `<div class="notebox"><label for="noteIn" class="note" style="font-weight:600">Paste Claude's answer or write your own note</label><textarea id="noteIn">${esc(text || "")}</textarea>
+  box.innerHTML = `<h3><svg class="i" viewBox="0 0 24 24" style="color:var(--accent)"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>${title}</h3>
+   ${editing ? `<div class="stack"><label for="noteIn" class="note" style="font-weight:600">Paste Claude's answer or write your own note</label><textarea id="noteIn">${esc(text || "")}</textarea>
       <div class="coachacts"><button class="btn primary" data-act="savenote">Save note</button><button class="btn ghost" data-act="cancelnote">Cancel</button></div></div>`
      : `${text ? `<p class="coachtext">${esc(text)}</p>` : `<p class="note">${empty}</p>`}
-       <div class="coachacts"><button class="btn primary" data-act="ask">${m ? "Ask Claude about this move" : "Ask Claude for a summary"}</button><button class="btn" data-act="editnote">${text ? "Edit note" : "Add note"}</button></div>`}`;
+       <div class="coachacts"><button class="btn primary" data-act="ask">${m ? "Ask Claude about this move" : "Ask Claude for a summary"}</button><button class="btn soft" data-act="editnote">${text ? "Edit note" : "Add note"}</button></div>`}`;
   if (editing) setTimeout(() => { const t = $("#noteIn"); if (t) t.focus(); }, 30);
 }
 async function saveNote() {
@@ -542,6 +680,7 @@ async function saveNote() {
   } catch (e) { toast("Couldn't save the note on this device."); }
   S.editing = null; renderCoach();
 }
+
 
 // ---------- analyze sheet ----------
 let cancelTok = null, wakeLock = null;
@@ -661,130 +800,6 @@ async function importFile(file) {
   } catch (e) { toast(e.message && !/JSON/.test(e.message) ? e.message : "That file isn't a Chess Review Lab backup."); }
 }
 
-// ---------- events ----------
-document.addEventListener("click", e => {
-  const t = e.target.closest("button"); if (!t) return;
-  if (t.dataset.open) return openGame(t.dataset.open);
-  if (t.dataset.ply) return setP(+t.dataset.ply);
-  if (t.dataset.plyJump) return setP(+t.dataset.plyJump);
-  if (t.dataset.lk && S.line) return lineStep(+t.dataset.lk);
-  const a = t.dataset.act; const m = S.cur && curMove();
-  if (a === "new") return openSheet();
-  if (a === "better" && m) { S.better = !S.better; S.line = null; renderBoard(); renderPanel(); renderLineBar(); return; }
-  if (a === "playbest" && m) { S.better = false; startLine(m.fen, m.lineUci || [], `Engine line instead of ${m.san}`, m.color === "w" ? m.wb : 100 - m.wb); renderPanel(); return; }
-  if (a === "playrefut" && m) { S.better = false; startLine(S.cur.fens[S.p], m.refutUci || [], `How ${m.san} gets punished`, m.wW); renderPanel(); return; }
-  if (a === "lprev" && S.line) return lineStep(S.line.k - 1);
-  if (a === "lnext" && S.line) return lineStep(S.line.k + 1);
-  if (a === "lplay" && S.line) { if (lineTimer) { stopLine(); renderLineBar(); } else playLine(); return; }
-  if (a === "lexit") { S.line = null; renderBoard(); renderLineBar(); return; }
-  if (a === "ask" && S.cur) { return m ? askClaude(coachMovePrompt(S.cur, m)) : askClaude(coachSummaryPrompt(S.cur, false), coachSummaryPrompt(S.cur, true)); }
-  if (a === "editnote") { S.editing = m ? String(m.ply) : "summary"; renderCoach(); return; }
-  if (a === "cancelnote") { S.editing = null; renderCoach(); return; }
-  if (a === "savenote") return saveNote();
-});
-function goHome() {
-  if (history.state && history.state.g) history.back();
-  else { showView("lib"); renderLibrary(); }
-}
-$("#newBtn").onclick = () => openSheet();
-$("#homeBtn").onclick = goHome;
-$("#backBtn").onclick = goHome;
-$("#cancelBtn").onclick = closeSheet;
-$("#goBtn").onclick = runAnalysis;
-$("#pasteBtn").onclick = pasteClipboard;
-$("#sheet").addEventListener("click", e => { if (e.target.id === "sheet" && !cancelTok) closeSheet(); });
-$("#firstBtn").onclick = () => setP(0);
-$("#prevBtn").onclick = () => setP(S.p - 1);
-$("#nextBtn").onclick = () => setP(S.p + 1);
-$("#lastBtn").onclick = () => setP(1e9);
-function jumpErr(dir) {
-  const g = S.cur; if (!g) return;
-  const me = g.meta.side;
-  const plies = g.data.moves.filter(m => m.cls && m.cls !== "inaccuracy" && (!me || m.color === me)).map(m => m.ply);
-  const t = dir > 0 ? plies.find(p => p > S.p) : plies.reverse().find(p => p < S.p);
-  if (t != null) setP(t); else toast(dir > 0 ? "No more mistakes after this point." : "No mistakes before this point.", 1800);
-}
-$("#prevErrBtn").onclick = () => jumpErr(-1);
-$("#nextErrBtn").onclick = () => jumpErr(1);
-$("#flipBtn").onclick = () => { S.flip = !S.flip; renderBoard(); };
-$("#hintBtn").onclick = () => { S.hint = !S.hint; renderPosition(); };
-$("#exportBtn").onclick = exportGames;
-$("#importIn").onchange = e => { const f = e.target.files && e.target.files[0]; if (f) importFile(f); e.target.value = ""; };
-let delArm = null;
-$("#delBtn").onclick = async () => {
-  const b = $("#delBtn");
-  if (!delArm) { b.textContent = "Tap again to delete for good"; delArm = setTimeout(() => { delArm = null; b.textContent = "Delete this game"; }, 4000); return; }
-  clearTimeout(delArm); delArm = null; b.textContent = "Delete this game";
-  const id = S.cur.id;
-  try { await store.del("games", id); await store.del("analyses", id); } catch (e) {}
-  S.games.delete(id); S.data.delete(id); S.cur = null;
-  goHome(); toast("Game deleted");
-};
-document.addEventListener("keydown", e => {
-  if (!$("#sheet").hidden) { if (e.key === "Escape" && !cancelTok) closeSheet(); return; }
-  if ($("#gameView").hidden || /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
-  if (S.line && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { lineStep(S.line.k + (e.key === "ArrowRight" ? 1 : -1)); e.preventDefault(); return; }
-  if (e.key === "ArrowLeft") { setP(S.p - 1); e.preventDefault(); }
-  if (e.key === "ArrowRight") { setP(S.p + 1); e.preventDefault(); }
-  if (e.key === "Home") setP(0);
-  if (e.key === "End") setP(1e9);
-});
-(() => { // swipe on the board
-  let x0 = null, y0 = null;
-  const b = $("#board");
-  b.addEventListener("touchstart", e => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
-  b.addEventListener("touchend", e => {
-    if (x0 == null) return; const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0; x0 = null;
-    if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
-    const step = dx < 0 ? 1 : -1;
-    if (S.line) lineStep(S.line.k + step); else setP(S.p + step);
-  });
-})();
-window.addEventListener("popstate", ev => {
-  if (!$("#sheet").hidden && !cancelTok) closeSheet();
-  const st = ev.state;
-  if (st && st.g && S.games.has(st.g)) openGame(st.g, false);
-  else { S.cur = null; stopLine(); showView("lib"); renderLibrary(); }
-});
-
-// ---------- install + updates ----------
-const APP_VERSION = 3;
-let swReg = null;
-async function checkForUpdate(manual) {
-  try {
-    const r = await fetch("version.json?t=" + Date.now(), { cache: "no-store" });
-    const v = r.ok ? (await r.json()).version : null;
-    if (swReg) await swReg.update().catch(() => {});
-    if (v && v > APP_VERSION) {
-      if (swReg && (swReg.waiting || swReg.installing)) { if (manual) toast("Downloading the update…"); }
-      else if (manual) toast("Update found. It will be ready in a few seconds.");
-    } else if (manual) toast("You have the latest version.");
-  } catch (e) { if (manual) toast("Couldn't check for updates. Are you online?"); }
-}
-let deferredInstall = null;
-const standalone = () => (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
-window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferredInstall = e; $("#installBtn").hidden = false; });
-window.addEventListener("appinstalled", () => { $("#installBtn").hidden = true; deferredInstall = null; toast("Installed. Open Chess Lab from your home screen."); });
-$("#installBtn").onclick = async () => { if (!deferredInstall) return; deferredInstall.prompt(); try { await deferredInstall.userChoice; } catch (e) {} deferredInstall = null; $("#installBtn").hidden = true; };
-if (!standalone() && /iPhone|iPad|iPod/.test(navigator.userAgent) && !LS("crl-ios-ok")) $("#iosNote").hidden = false;
-$("#iosClose").onclick = () => { LS("crl-ios-ok", "1"); $("#iosNote").hidden = true; };
-if ("serviceWorker" in navigator && location.protocol !== "file:") {
-  let reloading = false, wantUpdate = false;
-  navigator.serviceWorker.addEventListener("controllerchange", () => { if (!wantUpdate || reloading) return; reloading = true; location.reload(); });
-  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(reg => {
-    swReg = reg;
-    reg.update().catch(() => {});
-    const offer = w => {
-      if (!w || !navigator.serviceWorker.controller) return;
-      $("#updateNote").hidden = false;
-      $("#updateBtn").onclick = () => { if (cancelTok) { toast("Finish the current analysis first."); return; } wantUpdate = true; w.postMessage("skipWaiting"); };
-    };
-    if (reg.waiting) offer(reg.waiting);
-    reg.addEventListener("updatefound", () => { const w = reg.installing; if (w) w.addEventListener("statechange", () => { if (w.state === "installed") offer(w); }); });
-    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") reg.update().catch(() => {}); });
-  }).catch(() => {});
-}
-
 
 // ---------- chess.com account sync ----------
 // Uses chess.com's public API (https://www.chess.com/news/view/published-data-api): no login needed.
@@ -886,8 +901,7 @@ async function ccLink(name) {
   try {
     const p = await ccFetch(CC_API + encodeURIComponent(user));
     CC.cfg = { user: p.username || user, since: null, auto: true, depth: 14, lastSync: 0, skip: [] };
-    ccSave(); LS("crl-user", CC.cfg.user);
-    $("#userLine").textContent = `${CC.cfg.user} · Stockfish 19 review`;
+    ccSave(); LS("crl-user", CC.cfg.user); setTab("Games");
     renderCC(); toast(`Linked ${CC.cfg.user}. Loading your games…`);
     ccSync();
   } catch (e) {
@@ -936,7 +950,7 @@ async function ccRun() {
       CC.recent = CC.recent.filter(x => x.url !== item.url);
     }
     CC.running = null;
-    if (!$("#libView").hidden) renderLibrary(); else renderCC();
+    renderLibrary(); renderCC();
   }
   const n = CC.done;
   CC.running = null; CC.queue = []; CC.total = 0; CC.done = 0; CC.cancel = null;
@@ -945,46 +959,55 @@ async function ccRun() {
   if (n) toast(`${n} new game${n > 1 ? "s" : ""} analyzed`);
 }
 
-// ---------- card ----------
+
+// ---------- chess.com: Games-tab strip + Settings section ----------
 function ago(ts) {
   if (!ts) return "never";
   const s = Math.round((Date.now() - ts) / 1000);
   if (s < 60) return "just now"; if (s < 3600) return `${Math.round(s / 60)} min ago`;
   if (s < 86400) return `${Math.round(s / 3600)} h ago`; return `${Math.round(s / 86400)} d ago`;
 }
-function renderCC() {
-  const el = $("#ccCard"); if (!el) return;
+const RES_TXT = { win: "W", loss: "L", draw: "D" };
+function renderCC() { renderCCStrip(); renderCCSettings(); }
+function renderCCStrip() {
+  const el = $("#ccStrip"); if (!el) return;
   if (!CC.cfg) {
-    el.innerHTML = `<h2>Link your chess.com account</h2>
-     <p class="note">Your recent games load automatically, and new ones get analyzed each time you open the app.</p>
-     <form id="ccForm" class="ccform"><input id="ccUser" aria-label="chess.com username" placeholder="chess.com username" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(LS("crl-user") || "hckymstr19")}"><button id="ccLinkBtn" class="btn primary">Link account</button></form>
-     <p id="ccErr" class="err" hidden></p>`;
-    $("#ccForm").addEventListener("submit", e => { e.preventDefault(); ccLink($("#ccUser").value); });
+    el.innerHTML = S.games.size ? `<div class="card sync"><span class="dot" style="background:var(--faint)"></span><div class="t"><b>Load games automatically</b><span>Link your chess.com account</span></div><button class="btn sm soft" data-tabgo="Settings">Link</button></div>` : "";
     return;
   }
   const c = CC.cfg;
   const busy = CC.running || CC.queue.length;
+  const err = !CC.syncing && CC.status;
   const queued = new Set(CC.queue.map(x => x.url));
   const pend = CC.recent.filter(x => !queued.has(x.url) && !(CC.running && CC.running.url === x.url));
-  const shown = CC.showAll ? pend : pend.slice(0, 5);
-  const row = x => `<div class="ccrow">
-     <span class="res sm ${x.outcome}">${x.outcome === "win" ? "W" : x.outcome === "loss" ? "L" : x.outcome === "draw" ? "D" : "?"}</span>
-     <span class="gt"><b>vs ${esc(x.opp)}${x.oppElo ? ` (${esc(x.oppElo)})` : ""}</b><span>${[x.date, x.tclass, tcLabel(x.tc)].filter(Boolean).map(esc).join(" · ")}</span></span>
-     <button class="btn sm" data-cc-analyze="${esc(x.url)}">Analyze</button></div>`;
-  el.innerHTML = `<div class="cchead">
-     <div class="gt"><b>chess.com · ${esc(c.user)}</b><span>${CC.syncing ? "Checking for new games…" : esc(CC.status) || `Synced ${ago(c.lastSync)}`}</span></div>
-     <button class="btn sm" data-act="ccsync" ${CC.syncing ? "disabled" : ""}>Sync</button>
-   </div>
-   ${busy ? `<div class="ccq"><div class="gt"><b>Analyzing ${CC.done + 1} of ${CC.total}${CC.running ? `: vs ${esc(CC.running.opp)}` : ""}</b><span>Keep the app open. You can browse your games meanwhile.</span></div>
-       <button class="btn sm ghost" data-act="ccstop">Stop</button><div class="prog" style="grid-column:1/-1"><i id="ccProg" style="width:${CC.pct || 0}%"></i></div></div>` : ""}
-   ${pend.length ? `<div class="cclist"><div class="cclisthead"><span class="eyebrow">Not analyzed yet · ${pend.length}</span>${pend.length > 1 ? `<button class="btn sm" data-act="ccall">Analyze all</button>` : ""}</div>${shown.map(row).join("")}
-       ${pend.length > 5 ? `<button class="btn sm ghost" data-act="ccmore">${CC.showAll ? "Show fewer" : `Show all ${pend.length}`}</button>` : ""}</div>`
-     : (!CC.syncing && !busy && c.lastSync && !CC.status ? `<p class="note">You're up to date. Games you play on chess.com show up here.</p>` : "")}
-   <details class="ccset"><summary>Sync settings</summary>
-     <label class="chk"><input type="checkbox" id="ccAuto" ${c.auto ? "checked" : ""}> Analyze new games automatically</label>
-     <label for="ccDepth">Depth for synced games<select id="ccDepth"><option value="12">Quick (12)</option><option value="14">Standard (14)</option><option value="16">Thorough (16)</option></select></label>
-     <button class="btn sm ghost danger" data-act="ccunlink">Unlink chess.com account</button>
-   </details>`;
+  const shown = CC.showAll ? pend : pend.slice(0, 3);
+  const row = x => `<div class="row">
+     <span class="res ${x.outcome}">${RES_TXT[x.outcome] || "?"}</span>
+     <span class="gt"><b>${esc(x.opp)}${x.oppElo ? ` <span class="elo">${esc(x.oppElo)}</span>` : ""}</b><span>${[x.tclass, shortDate(x.date)].filter(Boolean).map(esc).join(" · ")}</span></span>
+     <button class="btn sm soft" data-cc-analyze="${esc(x.url)}">Analyze</button></div>`;
+  el.innerHTML = `<div class="card sync"><span class="dot ${CC.syncing || busy ? "busy" : err ? "err" : ""}"></span>
+     <div class="t"><b>chess.com · ${esc(c.user)}</b><span>${CC.syncing ? "Checking for new games…" : err ? esc(CC.status) : `Synced ${ago(c.lastSync)}`}</span></div>
+     <button class="barbtn icon" style="color:var(--fg)" data-act="ccsync" aria-label="Sync now" ${CC.syncing ? "disabled" : ""}><svg class="i" viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-14.3 4.9M4 12a8 8 0 0 1 14.3-4.9M18 3v4h-4M6 21v-4h4"/></svg></button></div>
+   ${busy ? `<div class="card queue"><div class="top"><div><b>Analyzing ${CC.done + 1} of ${CC.total}${CC.running ? ` · vs ${esc(CC.running.opp)}` : ""}</b><span>Keep the app open. You can look around meanwhile.</span></div>
+       <button class="btn sm ghost" data-act="ccstop">Stop</button></div><div class="prog"><i id="ccProg" style="width:${CC.pct || 0}%"></i></div></div>` : ""}
+   ${pend.length ? `<div class="stack"><div class="sh">Not analyzed yet<span>${pend.length > 1 ? `<button class="btn sm ghost" style="min-height:28px;padding:0 6px;color:var(--accent)" data-act="ccall">Analyze all ${pend.length}</button>` : ""}</span></div>
+       <div class="card list">${shown.map(row).join("")}${pend.length > 3 ? `<button class="row" style="min-height:44px;justify-content:center;display:flex;color:var(--accent);font-weight:600" data-act="ccmore">${CC.showAll ? "Show fewer" : `Show ${pend.length - 3} more`}</button>` : ""}</div></div>` : ""}`;
+}
+function renderCCSettings() {
+  const el = $("#ccSettings"); if (!el) return;
+  if (!CC.cfg) {
+    el.innerHTML = `<div class="set"><p class="note">Link your account and your recent games load automatically. New ones get analyzed whenever you open the app.</p>
+     <form id="ccForm" class="inrow"><input class="tx" id="ccUser" aria-label="chess.com username" placeholder="chess.com username" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(LS("crl-user") || "hckymstr19")}"><button id="ccLinkBtn" class="btn primary">Link account</button></form>
+     <p id="ccErr" class="err" hidden></p></div>`;
+    $("#ccForm").addEventListener("submit", e => { e.preventDefault(); ccLink($("#ccUser").value); });
+    return;
+  }
+  const c = CC.cfg;
+  el.innerHTML = `<div class="set"><div class="kv"><span>Linked account</span><b>${esc(c.user)}</b></div><div class="kv"><span>Last synced</span><span>${ago(c.lastSync)}</span></div>
+     <button class="btn" data-act="ccsync" ${CC.syncing ? "disabled" : ""}>${CC.syncing ? "Syncing…" : "Sync now"}</button></div>
+   <div class="set"><label class="toggle" for="ccAuto">Analyze new games automatically<input type="checkbox" id="ccAuto" ${c.auto ? "checked" : ""}></label>
+     <label class="field" for="ccDepth">Depth for synced games<select class="tx" id="ccDepth" style="flex:none;max-width:260px"><option value="12">Quick (12)</option><option value="14">Standard (14)</option><option value="16">Thorough (16)</option></select></label></div>
+   <div class="set"><button class="btn ghost danger" style="justify-self:start;padding-left:0" data-act="ccunlink">Unlink chess.com account</button></div>`;
   $("#ccDepth").value = String(c.depth || 14);
   $("#ccAuto").onchange = e => { c.auto = e.target.checked; ccSave(); if (c.auto) ccSync({ quiet: true }); };
   $("#ccDepth").onchange = e => { c.depth = +e.target.value; ccSave(); };
@@ -1008,9 +1031,128 @@ function ccInit() {
   if (CC.cfg) ccSync({ quiet: true });
 }
 
+// ---------- events ----------
+document.addEventListener("click", e => {
+  const t = e.target.closest("button"); if (!t) return;
+  if (t.dataset.tab) return setTab(t.dataset.tab);
+  if (t.dataset.tabgo) { if (!$("#gameView").hidden) goHome(); return setTab(t.dataset.tabgo); }
+  if (t.dataset.open) return openGame(t.dataset.open);
+  if (t.dataset.ply) return setP(+t.dataset.ply);
+  if (t.dataset.plyJump) { setP(+t.dataset.plyJump); window.scrollTo({ top: 0, behavior: "smooth" }); return; }
+  if (t.dataset.lk && S.line) return lineStep(+t.dataset.lk);
+  const a = t.dataset.act; const m = S.cur && curMove();
+  if (a === "new") return openSheet();
+  if (a === "better" && m) { S.better = !S.better; S.line = null; renderBoard(); renderPanel(); renderLineBar(); return; }
+  if (a === "playbest" && m) { S.better = false; startLine(m.fen, m.lineUci || [], `Best line instead of ${m.san}`, m.color === "w" ? m.wb : 100 - m.wb); renderPanel(); return; }
+  if (a === "playrefut" && m) { S.better = false; startLine(S.cur.fens[S.p], m.refutUci || [], `How ${m.san} gets punished`, m.wW); renderPanel(); return; }
+  if (a === "lprev" && S.line) return lineStep(S.line.k - 1);
+  if (a === "lnext" && S.line) return lineStep(S.line.k + 1);
+  if (a === "lplay" && S.line) { if (lineTimer) { stopLine(); renderLineBar(); } else playLine(); return; }
+  if (a === "lexit") { S.line = null; renderBoard(); renderLineBar(); renderPanel(); return; }
+  if (a === "ask" && S.cur) { return m ? askClaude(coachMovePrompt(S.cur, m)) : askClaude(coachSummaryPrompt(S.cur, false), coachSummaryPrompt(S.cur, true)); }
+  if (a === "editnote") { S.editing = m ? String(m.ply) : "summary"; renderCoach(); return; }
+  if (a === "cancelnote") { S.editing = null; renderCoach(); return; }
+  if (a === "savenote") return saveNote();
+});
+function goHome() {
+  stopLine();
+  if (history.state && history.state.g) history.back();
+  else { S.cur = null; showView("lib"); renderLibrary(); renderCC(); }
+}
+$("#newBtn").onclick = () => openSheet();
+$("#backBtn").onclick = goHome;
+$("#cancelBtn").onclick = closeSheet;
+$("#goBtn").onclick = runAnalysis;
+$("#pasteBtn").onclick = pasteClipboard;
+$("#sheet").addEventListener("click", e => { if (e.target.id === "sheet" && !cancelTok) closeSheet(); });
+$("#firstBtn").onclick = () => S.line ? lineStep(0) : setP(0);
+$("#prevBtn").onclick = () => S.line ? lineStep(S.line.k - 1) : setP(S.p - 1);
+$("#nextBtn").onclick = () => S.line ? lineStep(S.line.k + 1) : setP(S.p + 1);
+$("#lastBtn").onclick = () => S.line ? lineStep(1e9) : setP(1e9);
+function jumpErr(dir) {
+  const g = S.cur; if (!g) return;
+  const me = g.meta.side;
+  const plies = g.data.moves.filter(m => m.cls && m.cls !== "inaccuracy" && (!me || m.color === me)).map(m => m.ply);
+  let t = dir > 0 ? plies.find(p => p > S.p) : plies.reverse().find(p => p < S.p);
+  if (t == null && dir > 0 && plies.length) { t = plies[0]; toast("Back to your first mistake", 1600); }
+  if (t != null) { setP(t); window.scrollTo({ top: 0, behavior: "smooth" }); } else toast("No mistakes in this game.", 1800);
+}
+$("#nextErrBtn").onclick = () => jumpErr(1);
+$("#flipBtn").onclick = () => { S.flip = !S.flip; renderBoard(); renderPlayers(); };
+$("#hintBtn").onclick = () => { S.hint = !S.hint; renderPosition(); toast(S.hint ? "Green arrow: the engine's best move here" : "Engine hint off", 1600); };
+$("#exportBtn").onclick = exportGames;
+$("#importIn").onchange = e => { const f = e.target.files && e.target.files[0]; if (f) importFile(f); e.target.value = ""; };
+document.addEventListener("keydown", e => {
+  if (!$("#sheet").hidden) { if (e.key === "Escape" && !cancelTok) closeSheet(); return; }
+  if ($("#gameView").hidden || /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
+  if (S.line && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { lineStep(S.line.k + (e.key === "ArrowRight" ? 1 : -1)); e.preventDefault(); return; }
+  if (e.key === "ArrowLeft") { setP(S.p - 1); e.preventDefault(); }
+  if (e.key === "ArrowRight") { setP(S.p + 1); e.preventDefault(); }
+  if (e.key === "Home") setP(0);
+  if (e.key === "End") setP(1e9);
+});
+(() => { // swipe on the board
+  let x0 = null, y0 = null;
+  const b = $("#board");
+  b.addEventListener("touchstart", e => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
+  b.addEventListener("touchend", e => {
+    if (x0 == null) return; const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0; x0 = null;
+    if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
+    const step = dx < 0 ? 1 : -1;
+    if (S.line) lineStep(S.line.k + step); else setP(S.p + step);
+  });
+})();
+window.addEventListener("popstate", ev => {
+  if (!$("#sheet").hidden && !cancelTok) closeSheet();
+  const st = ev.state;
+  if (st && st.g && S.games.has(st.g)) openGame(st.g, false);
+  else { S.cur = null; stopLine(); showView("lib"); renderLibrary(); renderCC(); }
+});
+
+
+// ---------- install + updates ----------
+const APP_VERSION = 4;
+let swReg = null;
+async function checkForUpdate(manual) {
+  try {
+    const r = await fetch("version.json?t=" + Date.now(), { cache: "no-store" });
+    const v = r.ok ? (await r.json()).version : null;
+    if (swReg) await swReg.update().catch(() => {});
+    if (v && v > APP_VERSION) {
+      if (swReg && (swReg.waiting || swReg.installing)) { if (manual) toast("Downloading the update…"); }
+      else if (manual) toast("Update found. It will be ready in a few seconds.");
+    } else if (manual) toast("You have the latest version.");
+  } catch (e) { if (manual) toast("Couldn't check for updates. Are you online?"); }
+}
+let deferredInstall = null;
+const standalone = () => (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
+window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferredInstall = e; $("#installBtn").hidden = false; });
+window.addEventListener("appinstalled", () => { $("#installBtn").hidden = true; deferredInstall = null; toast("Installed. Open Chess Lab from your home screen."); });
+$("#installBtn").onclick = async () => { if (!deferredInstall) return; deferredInstall.prompt(); try { await deferredInstall.userChoice; } catch (e) {} deferredInstall = null; $("#installBtn").hidden = true; };
+if (!standalone() && /iPhone|iPad|iPod/.test(navigator.userAgent) && !LS("crl-ios-ok")) $("#iosNote").hidden = false;
+$("#iosClose").onclick = () => { LS("crl-ios-ok", "1"); $("#iosNote").hidden = true; };
+if ("serviceWorker" in navigator && location.protocol !== "file:") {
+  let reloading = false, wantUpdate = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => { if (!wantUpdate || reloading) return; reloading = true; location.reload(); });
+  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(reg => {
+    swReg = reg;
+    reg.update().catch(() => {});
+    const offer = w => {
+      if (!w || !navigator.serviceWorker.controller) return;
+      $("#updateNote").hidden = false;
+      $("#updateBtn").onclick = () => { if (cancelTok) { toast("Finish the current analysis first."); return; } wantUpdate = true; w.postMessage("skipWaiting"); };
+    };
+    if (reg.waiting) offer(reg.waiting);
+    reg.addEventListener("updatefound", () => { const w = reg.installing; if (w) w.addEventListener("statechange", () => { if (w.state === "installed") offer(w); }); });
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") reg.update().catch(() => {}); });
+  }).catch(() => {});
+}
+
+
+
 // ---------- boot ----------
 (async () => {
-  const u = LS("crl-user") || "hckymstr19"; $("#userLine").textContent = `${u} · Stockfish 19 review`;
+  setTab("Games");
   try {
     const [metas, seeded] = await Promise.all([store.all("games"), store.get("kv", "seeded")]);
     S.games = metas;
