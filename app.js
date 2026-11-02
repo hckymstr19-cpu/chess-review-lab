@@ -748,6 +748,19 @@ window.addEventListener("popstate", ev => {
 });
 
 // ---------- install + updates ----------
+const APP_VERSION = 3;
+let swReg = null;
+async function checkForUpdate(manual) {
+  try {
+    const r = await fetch("version.json?t=" + Date.now(), { cache: "no-store" });
+    const v = r.ok ? (await r.json()).version : null;
+    if (swReg) await swReg.update().catch(() => {});
+    if (v && v > APP_VERSION) {
+      if (swReg && (swReg.waiting || swReg.installing)) { if (manual) toast("Downloading the update…"); }
+      else if (manual) toast("Update found. It will be ready in a few seconds.");
+    } else if (manual) toast("You have the latest version.");
+  } catch (e) { if (manual) toast("Couldn't check for updates. Are you online?"); }
+}
 let deferredInstall = null;
 const standalone = () => (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
 window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferredInstall = e; $("#installBtn").hidden = false; });
@@ -758,7 +771,9 @@ $("#iosClose").onclick = () => { LS("crl-ios-ok", "1"); $("#iosNote").hidden = t
 if ("serviceWorker" in navigator && location.protocol !== "file:") {
   let reloading = false, wantUpdate = false;
   navigator.serviceWorker.addEventListener("controllerchange", () => { if (!wantUpdate || reloading) return; reloading = true; location.reload(); });
-  navigator.serviceWorker.register("sw.js").then(reg => {
+  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(reg => {
+    swReg = reg;
+    reg.update().catch(() => {});
     const offer = w => {
       if (!w || !navigator.serviceWorker.controller) return;
       $("#updateNote").hidden = false;
@@ -1010,6 +1025,8 @@ function ccInit() {
   } catch (e) {
     $("#storeNote").hidden = false;
   }
+  $("#checkUpd").onclick = () => checkForUpdate(true);
+  checkForUpdate(false);
   dbReady = true;
   renderLibrary();
   ccInit();

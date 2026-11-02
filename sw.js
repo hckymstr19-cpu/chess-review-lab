@@ -1,5 +1,5 @@
 // Chess Review Lab service worker: lets the app open and analyze games offline.
-const VERSION = "crl-v2";
+const VERSION = "crl-v3";
 const SHELL = [
   "./", "index.html", "app.js", "core.js", "chess.js",
   "stockfish-19-lite-single.js", "stockfish-19-lite-single.wasm",
@@ -7,7 +7,8 @@ const SHELL = [
   "icons/icon-192.png", "icons/icon-512.png", "icons/maskable-512.png", "icons/apple-touch-icon.png",
 ];
 self.addEventListener("install", e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)));
+  // cache: "reload" skips the browser's HTTP cache, so an update never re-caches old files
+  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: "reload" })))));
 });
 self.addEventListener("activate", e => {
   e.waitUntil((async () => {
@@ -26,6 +27,7 @@ self.addEventListener("fetch", e => {
     e.respondWith(caches.match("index.html", { ignoreSearch: true }).then(r => r || fetch(req)));
     return;
   }
+  if (url.pathname.endsWith("/version.json")) return; // always ask the network
   e.respondWith(caches.match(req, { ignoreSearch: true }).then(hit => hit || fetch(req).then(res => {
     if (res.ok && res.type === "basic") { const copy = res.clone(); caches.open(VERSION).then(c => c.put(req, copy)); }
     return res;
