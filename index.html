@@ -247,6 +247,14 @@ input.tx,select.tx{border:1px solid var(--line);border-radius:10px;padding:8px 1
 .impact.blunder{background:var(--blunder-soft)}.impact.mistake{background:var(--mistake-soft)}.impact.inaccuracy{background:var(--inacc-soft)}
 .impact.best,.impact.good{background:var(--good-soft)}
 .impact b{font-variant-numeric:tabular-nums}
+.why{display:grid;gap:6px;padding:12px 14px;border-radius:12px;background:var(--sunk)}
+.whyh{font-size:13px;font-weight:700}
+.whyh + .whyl{margin-top:-2px}
+.whyl{margin:0 0 4px;padding:0;list-style:none;display:grid;gap:6px;font-size:14px;line-height:1.45}
+.whyl li{display:grid;grid-template-columns:18px minmax(0,1fr);gap:6px;align-items:start}
+.whyl li::before{font-weight:800;font-size:13px;line-height:1.5;text-align:center}
+.whyl.good li::before{content:"✓";color:var(--good)}
+.whyl.bad li::before{content:"✗";color:var(--blunder)}
 .facts{display:grid;gap:0}
 .fact{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
 .fact:first-child{border-top:0;padding-top:0}
@@ -355,7 +363,7 @@ textarea{width:100%;min-height:120px;border:1px solid var(--line);border-radius:
   </div>
   <div class="stack"><div class="sh">App</div>
    <div class="card">
-    <div class="set"><div class="kv"><span>Version</span><b id="appVer">4</b></div><button id="checkUpd" class="btn">Check for updates</button></div>
+    <div class="set"><div class="kv"><span>Version</span><b id="appVer">5</b></div><button id="checkUpd" class="btn">Check for updates</button></div>
     <div class="set"><p class="note">Engine: Stockfish 19 running on your phone. Analysis works offline.</p></div>
    </div>
   </div>

@@ -431,7 +431,19 @@ function renderPanel() {
     : vc === "best" ? `The engine's top choice. ${whose} winning chances: <b>${wa}%</b>.`
     : `${whose} winning chances: <b>${wa}%</b>${wb - wa >= 1 ? ` (from ${wb}%)` : ""}.`;
   let h = `<div class="mhead"><span class="glyph lg ${vc}" aria-hidden="true">${GLYPH[vc]}</span><div class="h"><h2>${esc(moveLabel(m))}</h2><span>${vt} · ${who}</span></div><span class="evchip" title="Engine evaluation (White's view)">${esc(evSigned(m.ev))}</span></div>
-   <p class="impact ${vc}">${impact}</p><div class="facts">`;
+   <p class="impact ${vc}">${impact}</p>`;
+  // plain-language reasons, worked out on the device from the engine's lines
+  let x = { good: [], bad: [] };
+  try { x = explainMove(m, g.meta, g.data.moves[m.ply - 2]); } catch (e) {}
+  const goodList = m.isBest || m.cls ? x.good : x.good.slice(0, 2);
+  if (goodList.length && !(m.isBest && goodList.every(r => r.k === "plan"))) {
+    const head = m.isBest ? "Why it works" : `Why ${esc(m.best)} is ${m.cls ? "better" : "the engine's pick"}`;
+    h += `<div class="why"><div class="whyh">${head}</div><ul class="whyl good">${goodList.map(r => `<li>${esc(r.t)}</li>`).join("")}</ul>
+      ${x.bad.length ? `<div class="whyh">What goes wrong with ${esc(m.san)}</div><ul class="whyl bad">${x.bad.map(t => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}</div>`;
+  } else if (x.bad.length) {
+    h += `<div class="why"><div class="whyh">What goes wrong with ${esc(m.san)}</div><ul class="whyl bad">${x.bad.map(t => `<li>${esc(t)}</li>`).join("")}</ul></div>`;
+  }
+  h += `<div class="facts">`;
   if (!m.isBest && m.best) {
     h += `<div class="fact"><span class="k">${m.cls ? "Best was" : "Engine preferred"}</span><span class="v"><b>${esc(m.best)}</b>&nbsp; ${esc(m.line.slice(1, 6).join(" "))}</span>
       <span class="acts2"><button class="btn sm soft" data-act="better">${S.better ? "Hide" : "Show"}</button><button class="btn sm soft" data-act="playbest">Play</button></span></div>`;
@@ -440,14 +452,12 @@ function renderPanel() {
     h += `<div class="fact"><span class="k">How it gets punished</span><span class="v">${esc(m.refut.slice(0, 6).join(" "))}</span>
       <span class="acts2"><button class="btn sm soft" data-act="playrefut">Play</button></span></div>`;
   }
-  if (m.cls && m.threat) {
-    const ignored = m.tags.some(t => t.startsWith("ignored"));
+  if (m.cls && m.threat && realThreat(m.fen, m.threatUci)) {
+    const ignored = (m.refutUci || [])[0] === m.threatUci;
     h += `<div class="fact"><span class="k">Threat before the move</span><span class="v">${esc(m.threat)}${ignored ? ' <span class="note" style="font-family:var(--body)">· not addressed</span>' : ""}</span></div>`;
   }
   if (m.spent != null) h += `<div class="fact"><span class="k">Time</span><span class="v">${m.spent}s on this move${m.clk != null ? ` · ${fmtClock(m.clk)} left` : ""}</span></div>`;
   h += "</div>";
-  const tags = (m.tags || []).filter(t => !t.startsWith("no simple") && !t.startsWith("ignored the threat"));
-  if (m.cls && tags.length) h += `<div class="tags">${tags.map(t => `<span class="tag">${esc(cap(t))}</span>`).join("")}</div>`;
   if (m.cls && !S.better && !S.line) h += `<p class="note">Red arrow: the reply that punishes ${esc(m.san)}.</p>`;
   if (S.better) h += `<p class="note">Red: your move. Blue: the engine's best.</p>`;
   el.innerHTML = h;
@@ -587,6 +597,246 @@ async function deleteGame() {
   goHome(); toast("Game deleted");
 }
 
+// ---------- move explainer: plain-language reasons, computed on the device from the engine's lines ----------
+// Every reason is checked against the position or the engine line it refers to; nothing is guessed.
+const XV = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 100 };
+const XN = { p: "pawn", n: "knight", b: "bishop", r: "rook", q: "queen", k: "king" };
+const sqName = (f, r) => "abcdefgh"[f] + (r + 1);
+const sqFR = s => [s.charCodeAt(0) - 97, +s[1] - 1];
+function grid(ch) { // g[f][r] = {type,color} | null
+  const b = ch.board(), g = [];
+  for (let f = 0; f < 8; f++) { g[f] = []; for (let r = 0; r < 8; r++) g[f][r] = b[7 - r][f]; }
+  return g;
+}
+const inB = (f, r) => f >= 0 && f < 8 && r >= 0 && r < 8;
+const DIRS = { b: [[1, 1], [1, -1], [-1, 1], [-1, -1]], r: [[1, 0], [-1, 0], [0, 1], [0, -1]] };
+DIRS.q = DIRS.b.concat(DIRS.r);
+function attacksFrom(g, f, r) {
+  const p = g[f][r]; if (!p) return [];
+  const out = [];
+  if (p.type === "p") { const d = p.color === "w" ? 1 : -1; [[-1, d], [1, d]].forEach(([a, b]) => { if (inB(f + a, r + b)) out.push([f + a, r + b]); }); }
+  else if (p.type === "n") [[1, 2], [2, 1], [2, -1], [1, -2], [-1, -2], [-2, -1], [-2, 1], [-1, 2]].forEach(([a, b]) => { if (inB(f + a, r + b)) out.push([f + a, r + b]); });
+  else if (p.type === "k") { for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) if ((a || b) && inB(f + a, r + b)) out.push([f + a, r + b]); }
+  else DIRS[p.type].forEach(([a, b]) => { let x = f + a, y = r + b; while (inB(x, y)) { out.push([x, y]); if (g[x][y]) break; x += a; y += b; } });
+  return out;
+}
+function attackers(g, f, r, color) {
+  const out = [];
+  for (let x = 0; x < 8; x++) for (let y = 0; y < 8; y++) {
+    const p = g[x][y]; if (!p || p.color !== color) continue;
+    if (attacksFrom(g, x, y).some(([a, b]) => a === f && b === r)) out.push({ f: x, r: y, type: p.type });
+  }
+  return out;
+}
+// in danger = attacked by something cheaper, or attacked more often than defended
+function danger(g, f, r) {
+  const p = g[f][r]; if (!p || p.type === "k") return null;
+  const enemy = p.color === "w" ? "b" : "w";
+  const att = attackers(g, f, r, enemy); if (!att.length) return null;
+  const def = attackers(g, f, r, p.color);
+  const cheapest = att.reduce((a, b) => XV[a.type] <= XV[b.type] ? a : b);
+  if (XV[cheapest.type] < XV[p.type] || !def.length || att.length > def.length) return cheapest;
+  return null;
+}
+function afterMove(fen, uci) { const ch = new Chess(fen); const m = uciMove(ch, uci); return m ? { ch, m } : null; }
+function amount(n) {
+  if (n >= 8) return "a queen's worth of material"; if (n >= 5) return "a rook's worth of material";
+  if (n >= 3) return "a piece"; if (n === 2) return "two pawns"; return "a pawn";
+}
+function sanList(fen, ucis, n) { return ucisToSans(fen, ucis, n).join(" "); }
+// material for `color` at the end of a line. A line cut mid-exchange is read cautiously:
+// for a gain take the lower of the last two plies, for a loss take the higher.
+function settled(fen, ucis, plies, color, mode = "gain") {
+  const n = Math.min(plies, ucis.length);
+  if (n === 0) return balAfter(fen, [], 0, color);
+  const a = balAfter(fen, ucis, n, color);
+  if (n === 1) return a;
+  const b = balAfter(fen, ucis, n - 1, color);
+  return mode === "gain" ? Math.min(a, b) : Math.max(a, b);
+}
+// material when the first burst of captures is over (the next move in the line is not a capture)
+function quietPoint(fen, ucis, max = 8) {
+  const ch = new Chess(fen); let k = 0;
+  for (; k < Math.min(max, ucis.length); k++) {
+    const mv = uciMove(ch, ucis[k]); if (!mv) break;
+    const nxt = ucis[k + 1]; if (!nxt) { k++; break; }
+    const probe = new Chess(ch.fen()); const nm = uciMove(probe, nxt);
+    if (!nm || (!nm.captured && !ch.in_check())) { k++; break; }
+  }
+  return k;
+}
+// a real threat is a check, or a capture that wins material (the target is undefended or worth more than the capturer)
+function realThreat(fen, uci) {
+  if (!uci) return null;
+  const r = afterMove(nullMoveFen(fen), uci); if (!r) return null;
+  if (/[+#]/.test(r.m.san)) return r.m;
+  if (!r.m.captured) return null;
+  const g = grid(r.ch); const [x, y] = sqFR(r.m.to);
+  const victim = r.m.color === "w" ? "b" : "w";
+  return !attackers(g, x, y, victim).length || XV[r.m.captured] > XV[r.m.piece] ? r.m : null;
+}
+// words that depend on whose move it is
+function voice(color, meta) {
+  const user = !meta || !meta.side || meta.side === color;
+  return {
+    my: user ? "your" : "their", My: user ? "Your" : "Their",
+    opp: user ? (meta && meta.side ? "your opponent" : "the opponent") : "you",
+    Opp: user ? (meta && meta.side ? "Your opponent" : "The opponent") : "You",
+    s: user ? "s" : "",  // verb ending for the opponent as subject: "Your opponent wins" / "You win"
+  };
+}
+
+// reasons a move is good, from the position before it (fen), for the side to move
+function goodReasons(fen, uci, lineUci, meta, ctx = {}) {
+  const out = [];
+  const pre = new Chess(fen); const me = pre.turn(), opp = me === "w" ? "b" : "w";
+  const V = voice(me, meta);
+  const g0 = grid(pre);
+  const res = afterMove(fen, uci); if (!res) return out;
+  const { ch, m } = res; const g1 = grid(ch);
+  const [tf, tr] = sqFR(m.to), [ff, fr] = sqFR(m.from);
+  const pt = m.promotion || m.piece;   // the piece standing on m.to after the move
+  const piece = XN[pt];
+  const line = lineUci && lineUci[0] === uci ? lineUci : [uci];
+  if (ch.in_checkmate()) { out.push({ k: "mate", t: "It's checkmate." }); return out; }
+  if (ctx.mateIn) out.push({ k: "mate", t: `It starts a forced checkmate in ${ctx.mateIn}: ${sanList(fen, line, Math.min(line.length, ctx.mateIn * 2 - 1))}.` });
+  // material, measured from before the opponent's last capture so a recapture isn't counted as a win
+  const recapture = ctx.prev && ctx.prev.captureOn === m.to && m.captured;
+  const base = recapture ? ctx.prev.balBefore(me) : balAfter(fen, [], 0, me);
+  const q = quietPoint(fen, line);
+  const quietGain = balAfter(fen, line, q, me) - base;
+  const longGain = settled(fen, line, 7, me) - base;
+  const gain = Math.max(quietGain, longGain);
+  if (!ctx.mateIn) {
+    if (gain >= 1) {
+      if (m.captured && !recapture && !attackers(g1, tf, tr, opp).length && XV[m.captured] >= gain) out.push({ k: "win", n: gain, t: `It wins ${amount(gain)}: the ${XN[m.captured]} on ${m.to} is free to take.` });
+      else out.push({ k: "win", n: gain, t: `It wins ${amount(gain)}: ${sanList(fen, line, quietGain >= longGain ? Math.max(q, 1) : 6)}.` });
+    } else if (recapture && gain >= 0) out.push({ k: "recap", t: `It takes back the ${XN[m.captured]}, so material stays even.` });
+    else if (m.captured && gain === 0 && XV[m.captured] === XV[pt]) out.push({ k: "trade", t: `It trades ${pt === m.captured ? `${piece}s` : `${V.my} ${piece} for the ${XN[m.captured]}`} and keeps material even.` });
+  }
+  // pin made by a bishop, rook or queen (pawns don't count)
+  if (["b", "r", "q"].includes(pt) && !m.san.includes("+")) {
+    for (const [a, b] of DIRS[pt]) {
+      let x = tf + a, y = tr + b, first = null;
+      while (inB(x, y)) {
+        const p = g1[x][y];
+        if (p) {
+          if (!first) { if (p.color !== opp || p.type === "p") break; first = { x, y, p }; }
+          else { if (p.color === opp && (p.type === "k" || XV[p.type] > XV[first.p.type])) out.push({ k: "pin", t: `It pins the ${XN[first.p.type]} on ${sqName(first.x, first.y)} to the ${XN[p.type]} behind it, so the ${XN[first.p.type]} can't move${p.type !== "k" ? ` without losing the ${XN[p.type]}` : ""}.` }); break; }
+        }
+        x += a; y += b;
+      }
+    }
+  }
+  // fork, check, or attack on a valuable / undefended piece
+  const hits = attacksFrom(g1, tf, tr).map(([x, y]) => ({ x, y, p: g1[x][y] }))
+    .filter(o => o.p && o.p.color === opp && o.p.type !== "p" && (o.p.type === "k" || XV[o.p.type] > XV[pt] || !attackers(g1, o.x, o.y, opp).length));
+  if (hits.length >= 2) out.push({ k: "fork", t: `It's a fork: ${V.my} ${piece} attacks the ${hits.map(h => `${XN[h.p.type]}${h.p.type === "k" ? "" : ` on ${sqName(h.x, h.y)}`}`).join(" and the ")} at once.` });
+  else if (m.san.includes("+")) out.push({ k: "check", t: `It gives check, so ${V.opp} ${V.s ? "has" : "have"} to respond to it right away.` });
+  else if (hits.length === 1 && !out.some(o => o.k === "pin")) {
+    const h = hits[0];
+    out.push({ k: "attack", t: `It attacks the ${XN[h.p.type]} on ${sqName(h.x, h.y)}${!attackers(g1, h.x, h.y, opp).length ? ", which has no defender" : ""}, gaining time.` });
+  }
+  // rescues the piece that moves
+  const was = danger(g0, ff, fr);
+  if (was && !m.captured && !danger(g1, tf, tr)) out.push({ k: "save", t: `It moves ${V.my} ${piece} out of danger: it was attacked by the ${XN[was.type]} on ${sqName(was.f, was.r)}.` });
+  // protects another piece (not by capturing its attacker, which the capture reason already covers)
+  defend: for (let x = 0; x < 8; x++) for (let y = 0; y < 8; y++) {
+    const p = g0[x][y]; if (!p || p.color !== me || (x === ff && y === fr) || p.type === "p" || p.type === "k") continue;
+    const d0 = danger(g0, x, y);
+    if (d0 && !(m.captured && sqName(d0.f, d0.r) === m.to) && g1[x][y] && g1[x][y].color === me && !danger(g1, x, y)) {
+      out.push({ k: "defend", t: `It protects ${V.my} ${XN[p.type]} on ${sqName(x, y)}, which was in danger.` }); break defend;
+    }
+  }
+  // handles the opponent's threat (only real threats: a capture or a check)
+  const thr = realThreat(fen, ctx.threatUci);
+  if (thr && !out.some(o => ["save", "defend", "mate", "check"].includes(o.k))) {
+    const t = afterMove(ch.fen(), ctx.threatUci);
+    const stillWorks = t && (t.m.captured ? (() => { const gt = grid(t.ch); const [x, y] = sqFR(t.m.to); return !attackers(gt, x, y, me).length || XV[t.m.captured] > XV[t.m.piece]; })() : /[+#]/.test(t.m.san));
+    if (!stillWorks) out.push({ k: "threat", t: `It stops the threat ${thr.san}.` });
+  }
+  // quieter ideas, only when nothing concrete applies
+  if (!out.length) {
+    if (m.flags.includes("k") || m.flags.includes("q")) out.push({ k: "plan", t: `It castles, getting ${V.my} king to safety and connecting the rooks.` });
+    else if (m.promotion) out.push({ k: "plan", t: `It promotes the pawn to a ${XN[m.promotion]}.` });
+    else if ((m.piece === "n" || m.piece === "b") && fr === (me === "w" ? 0 : 7)) out.push({ k: "plan", t: `It develops ${V.my} ${piece} toward the center.` });
+    else if (m.piece === "p" && ["d", "e"].includes(m.to[0]) && !m.captured && Number(fen.split(" ")[5]) <= 12) out.push({ k: "plan", t: "It claims space in the center with a pawn." });
+    else if (m.piece === "p" && isPassed(g1, tf, tr, me)) out.push({ k: "plan", t: `It pushes ${V.my} passed pawn closer to promoting.` });
+  }
+  return out;
+}
+function isPassed(g, f, r, color) {
+  const d = color === "w" ? 1 : -1;
+  for (let x = f - 1; x <= f + 1; x++) { if (x < 0 || x > 7) continue; for (let y = r + d; y >= 0 && y < 8; y += d) { const p = g[x][y]; if (p && p.type === "p" && p.color !== color) return false; } }
+  return true;
+}
+// what goes wrong with the move that was played
+function badReasons(m, meta) {
+  const out = [];
+  const res = afterMove(m.fen, m.uci); if (!res) return out;
+  const { ch } = res; const me = m.color;
+  const V = voice(me, meta);
+  const refut = m.refutUci || [];
+  const evA = String(m.ev || "");
+  if (evA.startsWith("#")) {
+    const n = parseInt(evA.slice(1), 10);
+    if (n && ((me === "w" && n < 0) || (me === "b" && n > 0))) { out.push(`It allows a forced checkmate in ${Math.abs(n)}: ${sanList(ch.fen(), refut, Math.abs(n) * 2 - 1)}.`); return out; }
+  }
+  // measured from before the move if it was a capture, so a fair trade isn't counted as a loss
+  const lost = Math.min(balance(new Chess(m.fen), me), balance(ch, me)) - settled(ch.fen(), refut, 6, me, "loss");
+  const r1 = refut[0] && afterMove(ch.fen(), refut[0]);
+  if (r1 && lost >= 2) {
+    const g = grid(r1.ch); const [x, y] = sqFR(r1.m.to);
+    const hits = attacksFrom(g, x, y).map(([a, b]) => g[a][b]).filter(p => p && p.color === me && p.type !== "p" && (p.type === "k" || XV[p.type] > XV[r1.m.piece]));
+    if (hits.length >= 2) out.push(`${V.Opp} repl${V.s ? "ies" : "y"} ${r1.m.san}, forking ${V.my} ${hits.map(p => XN[p.type]).join(" and ")}.`);
+  }
+  if (lost >= 1 && !out.length) {
+    const cap = r1 && r1.m.captured ? `, starting with ${r1.m.san}` : "";
+    out.push(`${V.Opp} win${V.s} ${amount(lost)}${cap}: ${sanList(ch.fen(), refut, 5)}.`);
+  }
+  const thr = realThreat(m.fen, m.threatUci);
+  if (thr && refut[0] === m.threatUci) out.push(`It doesn't deal with the threat ${thr.san} that was already on the board.`);
+  if ((m.tags || []).some(t => t.startsWith("exposes the king")) && out.length < 2) out.push(`It leaves ${V.my} king exposed: the punishing line comes with several checks.`);
+  if (!out.length && m.drop >= 10) out.push(`Nothing is lost right away, but it hands ${V.opp} the better position: ${V.my} winning chances fall from ${Math.round(m.wb)}% to ${Math.round(m.wa)}%.`);
+  return out;
+}
+function moverMate(m) { // mate in N for the side that moves, from the stored eval (White's view)
+  const s = String(m.evB || ""); if (!s.startsWith("#")) return null;
+  const n = parseInt(s.slice(1), 10); if (!n) return null;
+  return (n > 0) === (m.color === "w") ? Math.abs(n) : null;
+}
+function evNum(s) { s = String(s || ""); if (s.startsWith("#")) return s.startsWith("#-") ? -20 : 20; const n = parseFloat(s); return isNaN(n) ? 0 : n; }
+// prev = the opponent's move just before m (to recognise recaptures)
+function explainMove(m, meta, prev) {
+  let pctx = null;
+  if (prev) {
+    const r = afterMove(prev.fen, prev.uci);
+    if (r && r.m.captured) pctx = { captureOn: r.m.to, balBefore: c => balAfter(prev.fen, [], 0, c) };
+  }
+  const ctx = { threatUci: m.threatUci, prev: pctx, mateIn: moverMate(m) };
+  if (m.isBest) return { good: goodReasons(m.fen, m.uci, m.lineUci, meta, ctx).slice(0, 3), bad: [] };
+  let good = m.bestUci ? goodReasons(m.fen, m.bestUci, m.lineUci, meta, ctx) : [];
+  // if the move played grabs the same material, winning it is not what makes the engine's move better
+  const playedWin = goodReasons(m.fen, m.uci, [m.uci, ...(m.refutUci || [])], meta, ctx).find(r => r.k === "win");
+  const bestWin = good.find(r => r.k === "win");
+  if (bestWin && playedWin && playedWin.n >= bestWin.n) good = good.filter(r => r !== bestWin);
+  good = good.slice(0, 3);
+  if (m.bestUci && !good.length) {
+    const diff = Math.abs(evNum(m.evB) - evNum(m.ev));
+    good.push({ k: "eval", t: `There's no quick tactic here. The engine prefers ${m.best} for longer-term reasons${diff >= 0.3 ? ` (about ${diff.toFixed(1)} pawns better)` : ""}. Play the line to see the plan, or ask Claude for the idea behind it.` });
+  }
+  let bad = m.cls ? badReasons(m, meta) : [];
+  // when the engine's move wins something concrete, say plainly that the chance was missed
+  const top = good.find(r => ["mate", "win", "fork", "pin"].includes(r.k));
+  if (m.cls && top) {
+    const what = top.k === "mate" ? "forces checkmate" : top.k === "win" ? `wins ${amount(top.n)}` : top.k === "fork" ? "is a winning fork" : "sets up a strong pin";
+    bad = bad.filter(t => !t.startsWith("Nothing is lost"));
+    bad.unshift(`It misses ${m.best}, which ${what}.`);
+  }
+  return { good, bad: bad.slice(0, 2) };
+}
+if (typeof module !== "undefined") module.exports = { explainMove };
+
 // ---------- coach: hand off to Claude, keep notes ----------
 function movesText(ms, upTo) {
   let s = "";
@@ -617,7 +867,7 @@ Stockfish verdict: ${m.cls ? CLS[m.cls][0] : m.isBest ? "best move" : "fine"}. W
 Evaluation (White's view, pawns): before ${m.evB}, after ${m.ev}.
 Best move: ${m.best}. Best line: ${m.line.join(" ")}
 Opponent's best reply after the move played: ${m.refut.join(" ") || "none"}
-${m.threat ? `What the opponent was threatening before the move: ${m.threat}\n` : ""}${m.tags.length ? `Engine motif hints (heuristic): ${m.tags.join("; ")}\n` : ""}${m.spent != null ? `Time spent: ${m.spent}s, clock after: ${fmtClock(m.clk)}\n` : ""}
+${m.threat && realThreat(m.fen, m.threatUci) ? `What the opponent was threatening before the move: ${m.threat}\n` : ""}${(() => { try { const x = explainMove(m, meta, g.data.moves[m.ply - 2]); return (x.good.length ? `Reasons the app found for the best move: ${x.good.map(r => r.t).join(" ")}\n` : "") + (x.bad.length ? `What goes wrong with the move played: ${x.bad.join(" ")}\n` : ""); } catch (e) { return ""; } })()}${m.spent != null ? `Time spent: ${m.spent}s, clock after: ${fmtClock(m.clk)}\n` : ""}
 Explain what this move does, ${m.cls ? "why it's a mistake and how it gets punished" : "whether it was good"}, what was better and why, and the habit to take away. Keep it under 200 words.`;
 }
 function coachSummaryPrompt(g, short) {
@@ -1111,7 +1361,7 @@ window.addEventListener("popstate", ev => {
 
 
 // ---------- install + updates ----------
-const APP_VERSION = 4;
+const APP_VERSION = 5;
 let swReg = null;
 async function checkForUpdate(manual) {
   try {
